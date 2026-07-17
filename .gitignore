@@ -8,7 +8,8 @@ ENV/
 *.pyc
 *.pyo
 *.pyd
-
+*.spec
+*.exe
 # Настройки VS Code
 .vscode/
 
