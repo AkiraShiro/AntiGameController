@@ -23,8 +23,9 @@ import tempfile
 import threading
 import urllib.request
 import subprocess
-
+import ssl
 from logger import get_logger
+from version import CURRENT_VERSION
 
 
 def _hidden_startupinfo():
@@ -110,13 +111,15 @@ class AutoUpdater:
             "User-Agent": "AntiGameController-Updater",
             "Accept": "application/vnd.github+json",
         })
-        with urllib.request.urlopen(req, timeout=15) as r:
+        # Создаем контекст без проверки сертификатов
+        context = ssl._create_unverified_context()
+        with urllib.request.urlopen(req, timeout=15, context=context) as r:
             data = json.loads(r.read().decode("utf-8"))
         return data
 
     def _maybe_apply(self, release: dict):
         tag = (release.get("tag_name") or "").lstrip("v")
-        current = self.config.get("installed_version", "1.0.0")
+        current = self.config.get("installed_version", CURRENT_VERSION)
         if not tag:
             return
         if tag == current:
@@ -150,13 +153,18 @@ class AutoUpdater:
         tmp_dir = tempfile.mkdtemp(prefix="antigame_update_")
         try:
             new_exe = os.path.join(tmp_dir, "AntiGameController.new.exe")
-            urllib.request.urlretrieve(url, new_exe)
+            
+            # urllib.request.urlretrieve не всегда стабильно принимает контекст,
+            # поэтому скачиваем через urlopen + shutil.copyfileobj
+            req = urllib.request.Request(url, headers={"User-Agent": "AntiGameController-Updater"})
+            context = ssl._create_unverified_context()
+            
+            with urllib.request.urlopen(req, context=context) as response, open(new_exe, 'wb') as out_file:
+                shutil.copyfileobj(response, out_file)
+                
             self._run_updater_bat(new_exe, new_version)
         except Exception as e:
             logger.error(f"Скачивание/замена не удались: {e}")
-        finally:
-            # updater.bat сам всё почистит; если не сможет — оставим
-            pass
 
     def _run_updater_bat(self, new_exe: str, new_version: str):
         """Создаёт .bat, который заменит текущий EXE и перезапустит."""

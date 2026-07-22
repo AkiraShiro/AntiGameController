@@ -17,7 +17,7 @@ import time
 import hashlib
 import subprocess
 import msvcrt
-
+from version import CURRENT_VERSION
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QListWidget, QPushButton, QLineEdit, QLabel,
@@ -311,7 +311,7 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central)
 
         header = QHBoxLayout()
-        title = QLabel("Anti-Game Controller")
+        title = QLabel(f"Anti-Game Controller v{CURRENT_VERSION}")
         title.setObjectName("titleLabel")
         header.addWidget(title)
 
@@ -1520,7 +1520,7 @@ def main():
     app.setQuitOnLastWindowClosed(False)
     w = MainWindow()
     sys.exit(app.exec_())
-
+ 
 
 if __name__ == "__main__":
     main()
