@@ -52,7 +52,8 @@ class AutoUpdater:
         self.main = main_window
         self.running = False
         self.thread: threading.Thread | None = None
-
+        if "github_repo" not in self.config:
+            self.config["github_repo"] = "AkiraShiro/AntiGameController"  # по умолчанию, если не задан в конфиге
     # ----- публичный API -----
 
     def start(self):
