@@ -1157,7 +1157,7 @@ class MainWindow(QMainWindow):
                 )
                 return
             tag = (info.get("tag_name") or "").lstrip("v")
-            current = self.config.get("installed_version", "?")
+            current = CURRENT_VERSION
             if tag == current:
                 QMessageBox.information(
                     self, "Обновление",

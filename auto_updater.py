@@ -5,12 +5,12 @@
 1. При запуске и периодически (раз в N часов) проверяем
    GET https://api.github.com/repos/{owner}/{repo}/releases/latest
 2. Сравниваем тег с сохранённым в конфиге installed_version.
-3. Если есть новая версия и включён auto_update → скачиваем .exe и
+3. Если есть новая версия и включён auto_update -> скачиваем .exe и
    запускаем updater.bat, который:
    - дождётся, пока текущий EXE закроется
    - заменит файл на новый
    - запустит его
-4. Если включён auto_update=False — уведомление в UI, ручной апдейт.
+4. Если включён auto_update=False -> уведомление в UI, ручной апдейт.
 
 Используется чистый stdlib (urllib.request), без внешних зависимостей.
 """
@@ -54,6 +54,7 @@ class AutoUpdater:
         self.thread: threading.Thread | None = None
         if "github_repo" not in self.config:
             self.config["github_repo"] = "AkiraShiro/AntiGameController"  # по умолчанию, если не задан в конфиге
+
     # ----- публичный API -----
 
     def start(self):
@@ -93,7 +94,14 @@ class AutoUpdater:
                 logger.debug(f"updater tick: {e}")
             time.sleep(CHECK_INTERVAL)
 
-    # ----- GitHub API -----
+    # ----- GitHub API & SSL -----
+
+    def _get_ssl_context(self):
+        """Контекст без проверки SSL (обход CERTIFICATE_VERIFY_FAILED)."""
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
 
     def _api_url(self) -> str:
         repo = self.config.get("github_repo", "").strip()
@@ -101,10 +109,7 @@ class AutoUpdater:
             raise ValueError(
                 "github_repo не задан (формат: 'owner/repo')"
             )
-        # Если указан файл .exe → скачиваем его, иначе первый asset
-        return (
-            f"https://api.github.com/repos/{repo}/releases/latest"
-        )
+        return f"https://api.github.com/repos/{repo}/releases/latest"
 
     def _fetch_release(self) -> dict:
         url = self._api_url()
@@ -112,8 +117,7 @@ class AutoUpdater:
             "User-Agent": "AntiGameController-Updater",
             "Accept": "application/vnd.github+json",
         })
-        # Создаем контекст без проверки сертификатов
-        context = ssl._create_unverified_context()
+        context = self._get_ssl_context()
         with urllib.request.urlopen(req, timeout=15, context=context) as r:
             data = json.loads(r.read().decode("utf-8"))
         return data
@@ -151,14 +155,15 @@ class AutoUpdater:
 
     def _download_and_replace(self, url: str, new_version: str):
         logger.info(f"Скачиваю обновление {new_version}...")
-        tmp_dir = tempfile.mkdtemp(prefix="antigame_update_")
+        
+        # Сохраняем в фиксированную папку во временном хранилище
+        download_dir = os.path.join(tempfile.gettempdir(), "antigame_updates")
+        os.makedirs(download_dir, exist_ok=True)
+        new_exe = os.path.join(download_dir, f"update_{new_version}.exe")
+
         try:
-            new_exe = os.path.join(tmp_dir, "AntiGameController.new.exe")
-            
-            # urllib.request.urlretrieve не всегда стабильно принимает контекст,
-            # поэтому скачиваем через urlopen + shutil.copyfileobj
             req = urllib.request.Request(url, headers={"User-Agent": "AntiGameController-Updater"})
-            context = ssl._create_unverified_context()
+            context = self._get_ssl_context()
             
             with urllib.request.urlopen(req, context=context) as response, open(new_exe, 'wb') as out_file:
                 shutil.copyfileobj(response, out_file)
@@ -174,41 +179,42 @@ class AutoUpdater:
         else:
             current_exe = os.path.abspath(sys.argv[0])
 
-        bat_path = os.path.join(tempfile.gettempdir(),
-                                "antigame_updater.bat")
+        bat_path = os.path.join(tempfile.gettempdir(), "antigame_updater.bat")
+        
+        # Скрипт ждет завершения процесса, подменяет exe, запускает его и чистит за собой мусор
         script = f"""@echo off
 chcp 65001 > nul
-timeout /t 3 /nobreak > nul
+timeout /t 2 /nobreak > nul
 :waitloop
 tasklist /FI "IMAGENAME eq {os.path.basename(current_exe)}" 2>NUL | find /I "{os.path.basename(current_exe)}" >NUL
 if "%ERRORLEVEL%"=="0" (
-    timeout /t 2 /nobreak > nul
+    timeout /t 1 /nobreak > nul
     goto waitloop
 )
 copy /Y "{new_exe}" "{current_exe}" > nul
 start "" "{current_exe}"
+del /Q "{new_exe}" > nul
 del /Q "{bat_path}"
 """
         with open(bat_path, "w", encoding="utf-8") as f:
             f.write(script)
 
-        # Запоминаем версию, чтобы не качать повторно
+        # Запоминаем версию
         self.config["installed_version"] = new_version
 
-        logger.info(
-            f"Запускаю updater.bat для замены на {new_version}"
-        )
+        logger.info(f"Запускаю updater.bat для замены на {new_version}")
         try:
-            # Запускаем .bat полностью в фоне: на Windows
-            # обязателен creationflags=CREATE_NO_WINDOW иначе
-            # мигнёт чёрное окно консоли.
             kwargs = {"shell": False, "close_fds": True}
             if os.name == "nt":
-                kwargs["creationflags"] = (
-                    getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-                )
+                kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
                 kwargs["startupinfo"] = _hidden_startupinfo()
+            
             subprocess.Popen(["cmd", "/c", bat_path], **kwargs)
+            
+            # Завершаем текущее приложение, чтобы освободить .exe файл для копирования
+            logger.info("Завершаем процесс для проведения обновления...")
+            os._exit(0)
+
         except Exception as e:
             logger.error(f"Не удалось запустить updater.bat: {e}")
 
@@ -219,13 +225,14 @@ del /Q "{bat_path}"
         if not self.main:
             return
         try:
-            from PyQt5.QtWidgets import QMessageBox
-            QMessageBox.information(
+            from PyQt5.QtCore import QMetaObject, Q_ARG, Qt
+            # Безопасный вызов окна из фонового потока в основной поток GUI
+            QMetaObject.invokeMethod(
                 self.main,
-                "Доступно обновление",
-                f"Новая версия: v{tag}\n\n"
-                f"Автообновление отключено — обновите вручную:\n"
-                f"{html_url or 'см. релизы на GitHub'}",
+                "show_update_notification",
+                Qt.QueuedConnection,
+                Q_ARG(str, tag),
+                Q_ARG(str, html_url or "")
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Не удалось отправить уведомление в UI: {e}")
