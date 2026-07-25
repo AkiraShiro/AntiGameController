@@ -26,7 +26,7 @@ from PyQt5.QtWidgets import (
     QTextEdit, QStatusBar, QFormLayout, QComboBox,
     QScrollArea, QInputDialog, QFileDialog
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QEvent
 from PyQt5.QtGui import QIcon, QTextCursor
 
 from logger import get_logger, get_log_file_path
@@ -231,6 +231,84 @@ class ChangeProfileDialog(QDialog):
         self.accept()
 
 
+# -------------- Локскрин --------------
+
+
+class LockScreen(QWidget):
+
+    def __init__(self):
+        super().__init__()
+        self.pressed_keys = set()
+        self.allow_exit = False  # Флаг разрешения на закрытие
+        self.init_ui()
+
+    def init_ui(self):
+        # Комплекс флагов:
+        # - WindowStaysOnTopHint: поверх всех
+        # - FramelessWindowHint: без рамок
+        # - Tool: убирает иконку с панели задач (усложняет Alt+Tab)
+        flags = (
+            Qt.WindowStaysOnTopHint
+            | Qt.FramelessWindowHint
+            | Qt.Tool
+            | Qt.WindowType_Mask
+        )
+        self.setWindowFlags(flags)
+
+        self.showFullScreen()
+        self.activateWindow()
+
+        # Визуальный интерфейс
+        layout = QVBoxLayout()
+        label = QLabel("Фокус внимания", self) #G+Space to exit
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet("font-size: 28px; color: #ffffff; font-weight: bold;")
+        layout.addWidget(label)
+
+        self.setLayout(layout)
+        self.setStyleSheet("background-color: #0d0d0d;")
+
+        # Включаем перехват потери фокуса
+        self.installEventFilter(self)
+
+    # 1. Защита от Alt+F4 и стандартного закрытия
+    def closeEvent(self, event):
+        if self.allow_exit:
+            event.accept()
+        else:
+            event.ignore()  # Игнорируем запрос на закрытие (Alt+F4 не сработает)
+
+    # 2. Обработка нажатий G + Space
+    def keyPressEvent(self, event):
+        self.pressed_keys.add(event.key())
+
+        if Qt.Key_G in self.pressed_keys and Qt.Key_Space in self.pressed_keys:
+            self.allow_exit = True
+            self.close()
+
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        self.pressed_keys.discard(event.key())
+        super().keyReleaseEvent(event)
+
+    # 3. Защита от Alt+Tab (возврат фокуса, если пользователь переключился)
+    def changeEvent(self, event):
+        if event.type() == QEvent.WindowStateChange:
+            if self.isMinimized():
+                self.showNormal()
+                self.showFullScreen()
+        super().changeEvent(event)
+
+    def eventFilter(self, obj, event):
+        # Если окно теряет фокус (например, из-за Alt+Tab) — возвращаем его на передний план
+        if event.type() == QEvent.WindowDeactivate:
+            self.activateWindow()
+            self.raise_()
+            return True
+        return super().eventFilter(obj, event)
+
+
 # ----------------- Главное окно -----------------
 
 class MainWindow(QMainWindow):
@@ -239,7 +317,7 @@ class MainWindow(QMainWindow):
         self._exit_requested = False
         self.config_manager = ConfigManager()
         self.config = self.config_manager.load()
-
+        self.lockscreen = None
         self.task_scheduler = TaskSchedulerManager()
         self.autostart = AutostartManager()
 
@@ -355,6 +433,20 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(control)
 
         self.statusBar().showMessage("Готов к работе")
+
+    def lockscreen_on(self):
+        self.lockscreen = LockScreen()
+
+    def lockscreen_off(self):
+        try:
+            if self.lockscreen is not None:
+                self.lockscreen.allow_exit = True
+                self.lockscreen.close()
+                self.lockscreen = None
+        except:
+            pass
+
+
 
     def create_processes_tab(self):
         tab = QWidget()
@@ -737,7 +829,6 @@ class MainWindow(QMainWindow):
         #применение
         if self.is_monitoring:
             self.save_lists_from_ui()
-            self.apply_changes()
 
     def delete_process(self):
         # Пароль на удаление
@@ -759,7 +850,6 @@ class MainWindow(QMainWindow):
         # Сразу применяем
         if self.is_monitoring:
             self.save_lists_from_ui()
-            self.apply_changes()
 
     def add_website(self):
         site = self.website_input.text().strip().lower()
@@ -1180,6 +1270,15 @@ class MainWindow(QMainWindow):
             cmd = command.get("command")
             from functools import partial
 
+            if cmd == "lockscreen_on":
+                # Включаем блокировку экрана (локально)
+                QTimer.singleShot(0, self.lockscreen_on)
+                logger.info("[server] команда: lockscreen_on")
+                
+            if cmd == "lockscreen_off":
+                # Выключаем блокировку экрана (локально)
+                QTimer.singleShot(0, self.lockscreen_off)
+                logger.info("[server] команда: lockscreen_off")
 
             if cmd == "start_protection":
                 if not self.is_monitoring:
