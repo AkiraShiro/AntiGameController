@@ -1264,6 +1264,40 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Обновление", f"Ошибка: {e}")
 
+    def _apply_config_from_server(self, command: dict):
+        """Безопасное применение конфига от сервера в главном потоке GUI."""
+        try:
+            payload = command.get("payload") or {}
+            new_cfg = command.get("config") or payload.get("config") or {}
+            
+            if not new_cfg:
+                logger.warning("[server] получен пустой конфиг или неверная структура")
+                return
+
+            self.config.update(new_cfg)
+            
+            # Обновляем имя агента, если оно пришло
+            agent_name = self.config.get("agent_name", "")
+            if agent_name and getattr(self, "network_agent", None) is not None:
+                self.network_agent.apply_agent_name(agent_name)
+            if hasattr(self, "agent_id_edit"):
+                self.agent_id_edit.setText(agent_name)
+
+            # Сохраняем обновленный конфиг
+            if self.config_manager.save(self.config):
+                self.load_lists_to_ui()
+                self.refresh_profiles_list()
+                self.apply_theme()
+                if self.is_monitoring:
+                    self.apply_blocking()
+                logger.info("[server] конфигурация успешно применена и сохранена")
+            else:
+                logger.error("[server] не удалось сохранить обновленную конфигурацию")
+
+        except Exception as e:
+            logger.exception(f"[server] ошибка при применении конфигурации: {e}")
+
+
     def on_server_command(self, command: dict):
         """Обработка команды от сервера (вызывается из NetworkAgent)."""
         try:
@@ -1297,23 +1331,10 @@ class MainWindow(QMainWindow):
                 )
                 logger.info("[server] команда: stop_protection")
             elif cmd == "apply_config":
-                # Сетевой агент оборачивает payload в отдельный ключ,
-                # поэтому читаем конфиг из обоих мест.
-                payload = command.get("payload") or {}
-                new_cfg = (command.get("config")
-                           or payload.get("config") or {})
-                self.config.update(new_cfg)
-                if new_cfg.get("agent_name") and getattr(self, "network_agent", None) is not None:
-                    self.network_agent.apply_agent_name(new_cfg.get("agent_name"))
-                if hasattr(self, "agent_id_edit"):
-                    self.agent_id_edit.setText(self.config.get("agent_name", ""))
-                if self.config_manager.save(self.config):
-                    self.load_lists_to_ui()
-                    self.refresh_profiles_list()
-                    self.apply_theme()
-                    if self.is_monitoring:
-                        self.apply_blocking()
-                    logger.info("[server] конфигурация обновлена")
+                # Замораживаем аргумент command и вызываем выделенный метод в главном потоке
+                from functools import partial
+                QTimer.singleShot(0, partial(self._apply_config_from_server, command))
+                logger.info("[server] команда apply_config отправлена в главный поток")
             elif cmd == "rename_agent":
                 payload = command.get("payload") or {}
                 new_name = (command.get("agent_name")

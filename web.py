@@ -567,7 +567,7 @@ tr.offline .status-pill::before {
   <section class="panel" id="configPanel">
     <div class="panel-header" onclick="toggleConfigPanel()">
       <div class="panel-title-wrapper">
-        <h2>Управление Конфигурациями (ПРИМЕНЯЕТ, НО ВЫЗЫВАЕТ КРАШ!!!!!!!☠️☠️☠️☠️)</h2>
+        <h2>Управление Конфигурациями</h2>
       </div>
       <button type="button" class="toggle-btn" id="togglePanelBtn">[ Развернуть ]</button>
     </div>
