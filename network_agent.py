@@ -33,36 +33,32 @@ MULTICAST_GROUP = "239.255.255.250" # Стандартный мультикас�
 
 def get_local_ip() -> str:
     """
-    Возвращает реальный локальный IPv4-адрес, игнорируя виртуальные подсети v2rayN.
+    Возвращает реальный локальный IPv4-адрес, игнорируя виртуальные подсети и VPN.
     """
     BAD_PREFIXES = ("127.", "0.", "172.0.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.30.", "172.31.")
     
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("", DISCOVERY_PORT))
+    # 1. Пробуем определить интерфейс по внешнему/сетевому маршруту без отправки данных
+    for test_target in [("8.8.8.8", 80), ("1.1.1.1", 80)]:
         try:
-            # Пробуем постучаться на дефолтный адрес, чтобы ОС выбрала рабочий физический интерфейс
-            s.connect(("192.168.1.254", 1))  
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0.5)
+            s.connect(test_target)
             ip = s.getsockname()[0]
+            s.close()
             if ip and not any(ip.startswith(p) for p in BAD_PREFIXES):
                 return ip
-        finally:
-            try:
-                s.close()
-            except Exception:
-                pass
-    except Exception:
-        pass
+        except Exception:
+            pass
 
+    # 2. Если внешней сети нет, сканируем локальные адаптеры системными средствами
     try:
         hostname = socket.gethostname()
         infos = socket.gethostbyname_ex(hostname)
-        # Сначала ищем классические домашние/рабочие подсети
+        # Сначала ищем стандартные домашние/офисные подсети
         for ip in infos[2]:
             if (ip.startswith("192.168.") or ip.startswith("10.")) and ":" not in ip:
                 return ip
-        # Если не нашли, берем любой, кроме петли и виртуалок
+        # Если не нашли, берем любой доступный физический
         for ip in infos[2]:
             if not any(ip.startswith(p) for p in BAD_PREFIXES) and ":" not in ip:
                 return ip
@@ -176,6 +172,7 @@ class NetworkAgent:
         while self.running:
             try:
                 now = time.time()
+                self.local_ip = get_local_ip()  # Динамически обновляем текущий IP подсети
 
                 is_host_now = (self.role == "host")
                 host_url_now = f"http://{self.local_ip}:{self.local_port}/" if is_host_now else (self.host_url or "")
@@ -223,7 +220,6 @@ class NetworkAgent:
     def _make_broadcast_socket(self) -> socket.socket:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # Для мультикаста задаем TTL пакета (1 означает в пределах одной локальной сети)
         s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
         s.settimeout(0.5)
         return s
@@ -233,7 +229,6 @@ class NetworkAgent:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("", DISCOVERY_PORT))
         
-        # Подписываем сокет на мультикаст-группу, чтобы ловить пакеты со всех адаптеров
         try:
             mreq = struct.pack("4sl", socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
             s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
@@ -246,7 +241,6 @@ class NetworkAgent:
     def _broadcast(self, sock: socket.socket, pkt: dict):
         try:
             data = json.dumps(pkt).encode("utf-8")
-            # Отправляем на мультикаст-адрес. ОС сама раскидает по всем интерфейсам
             sock.sendto(data, (MULTICAST_GROUP, DISCOVERY_PORT))
         except Exception as e:
             logger.debug(f"multicast broadcast error: {e}")
@@ -270,15 +264,15 @@ class NetworkAgent:
         return peers
 
     def _scan_for_host(self):
-        """Быстрый фоновый перебор локальной подсети (страховка на случай жесткого VPN)"""
+        """Быстрый фоновый перебор всей локальной подсети любой конфигурации."""
         if self.host_url or self.role == "host":
             return
             
         local_ip = get_local_ip()
-        if local_ip == "127.0.0.1" or local_ip.startswith("172."):
-            base_net = "192.168.1."
-        else:
-            base_net = ".".join(local_ip.split(".")[:3]) + "."
+        if local_ip == "127.0.0.1":
+            return
+            
+        base_net = ".".join(local_ip.split(".")[:3]) + "."
 
         def check_ip(ip_str):
             if self.host_url or self.role == "host":
@@ -286,7 +280,7 @@ class NetworkAgent:
             url = f"http://{ip_str}:{self.local_port}/api/agents/{self.agent_id}/heartbeat"
             try:
                 req = urllib.request.Request(url, method="POST", headers={"Connection": "close"})
-                with urllib.request.urlopen(req, timeout=0.6) as r:
+                with urllib.request.urlopen(req, timeout=0.8) as r:
                     if r.getcode() == 200 and not self.host_url:
                         self.host_url = f"http://{ip_str}:{self.local_port}/"
                         self.role = "client"
@@ -294,8 +288,8 @@ class NetworkAgent:
             except Exception:
                 pass
 
-        # Опрашиваем первые 50 адресов подсети параллельными потоками
-        for i in range(1, 51):
+        # Сканируем весь диапазон хостов подсети (от 1 до 254)
+        for i in range(1, 255):
             if self.host_url or self.role == "host": 
                 break
             threading.Thread(target=check_ip, args=(f"{base_net}{i}",), daemon=True).start()
@@ -325,13 +319,11 @@ class NetworkAgent:
                 self._last_host_seen = now
                 self._first_seen_others_ts = 0.0
 
+                # Если мы УЖЕ выступаем хостом и виден другой хост — уступаем только если мы не были первыми
                 if self.role == "host":
-                    best_sat = best.get("started_at") or 0.0
                     if self.agent_id == best["agent_id"]:
                         return
-                    if (not best_sat) or self.started_at < best_sat:
-                        return
-                    logger.info(f"Уступаю host {best['agent_name']} — он включился раньше")
+                    logger.info(f"Обнаружен другой хост {best['agent_name']}. Перехожу в режим клиента.")
                     self._stop_local_server()
                     self.role = "client"
                     self.host_url = best.get("host_url") or self.host_url
@@ -357,6 +349,7 @@ class NetworkAgent:
                 logger.warning(f"Host {self.host_url} не отвечает — запускаю election")
                 self.host_url = None
 
+            # Если мы уже хост и других хостов нет — сохраняем роль без перевыборов
             if self.role == "host":
                 return
 
@@ -372,7 +365,6 @@ class NetworkAgent:
                 self._first_seen_others_ts = now
             elapsed = now - self._first_seen_others_ts
             
-            # Если мультикаст «по воздуху» не прошел за GRACE_PERIOD, подключаем фоновый сканер подсети
             if elapsed >= GRACE_PERIOD and not self.host_url:
                 self._scan_for_host()
                 
@@ -433,7 +425,6 @@ class NetworkAgent:
             self._sync_configs(heartbeat_data.get("configs") if isinstance(heartbeat_data, dict) else None)
         except urllib.error.URLError as e:
             logger.warning(f"host недоступен: {e.reason}")
-            self.host_url = None
         except Exception as e:
             logger.exception(f"client_tick error: {e}")
 
@@ -469,13 +460,14 @@ class NetworkAgent:
                 except urllib.error.URLError as e:
                     consecutive_failures += 1
                     logger.warning(f"poll commands: host недоступен; попытка {consecutive_failures}")
-                    if consecutive_failures >= 3:
-                        logger.warning("host не отвечает 3 попытки подряд — запускаю election")
+                    # Даем запасы на временные просадки Wi-Fi сети (5 попыток с паузой)
+                    if consecutive_failures >= 5:
+                        logger.warning("host не отвечает 5 попыток подряд — запускаю election")
                         self.host_url = None
-                    time.sleep(2.0)
+                    time.sleep(3.0)
                 except Exception as e:
                     logger.error(f"poll commands cycle error: {e}")
-                    time.sleep(2.0)
+                    time.sleep(3.0)
         finally:
             self._command_thread_active = False
 

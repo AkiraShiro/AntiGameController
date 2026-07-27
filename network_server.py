@@ -1,20 +1,5 @@
 """
 Встроенный сервер + веб-админка для Anti-Game Controller.
-
-Используется, когда нет внешнего сервера — этот ПК становится
-«главным» и предоставляет админку остальным ноутбукам в локальной сети.
-
-Стек:
-- Python http.server (без внешних зависимостей)
-- HTML/CSS/JS (vanilla, без фреймворков) — шаблон ниже
-- Хранение состояния: SQLite (встроенный) или in-memory dict
-- Эндпоинты:
-    POST /api/agents/<id>/heartbeat
-    GET  /api/agents/<id>/commands?since=N
-    POST /api/agents/<id>/logs
-    GET  /api/agents
-    POST /api/agents/<id>/command
-    GET  /                         — веб-админка
 """
 import os
 import json
@@ -115,14 +100,6 @@ class Store:
             )
 
     def list_agents(self):
-        """Returns ALL agent rows (including offline) so the UI can
-        show recently seen machines while a new host is being elected.
-
-        Сортировка стабильная по agent_name (без учёта регистра),
-        а HEARTBEAT last_seen не должен влиять на позицию строки —
-        иначе имена "прыгают" при каждом heartbeat и невозможно
-        отредактировать имя ноутбука.
-        """
         with self.lock, self._conn() as c:
             cur = c.execute(
                 """SELECT agent_id, agent_name, hostname, ip,
@@ -139,7 +116,6 @@ class Store:
             return [dict(zip(cols, r)) for r in cur.fetchall()]
 
     def list_online_agents(self):
-        """Online-only filter - kept for backward compatibility."""
         now = time.time()
         return [
             a for a in self.list_agents()
@@ -483,11 +459,24 @@ def start_local_server(port: int, db_path: str, admin_password_hash: str | None 
 
 
 def get_local_ip() -> str:
+    BAD_PREFIXES = ("127.", "0.", "172.0.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.30.", "172.31.")
+    for test_target in [("8.8.8.8", 80), ("1.1.1.1", 80)]:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0.5)
+            s.connect(test_target)
+            ip = s.getsockname()[0]
+            s.close()
+            if ip and not any(ip.startswith(p) for p in BAD_PREFIXES):
+                return ip
+        except Exception:
+            pass
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        hostname = socket.gethostname()
+        infos = socket.gethostbyname_ex(hostname)
+        for ip in infos[2]:
+            if (ip.startswith("192.168.") or ip.startswith("10.")) and ":" not in ip:
+                return ip
     except Exception:
-        return "127.0.0.1"
+        pass
+    return "127.0.0.1"
