@@ -2,7 +2,7 @@
 Сетевой агент Anti-Game Controller.
 
 Работает ТОЛЬКО в локальной сети. Режим выбирается автоматически (election):
-Использует гибридный поиск: Мультикаст (для работы через v2rayN) + Фоновый сканер подсети.
+Использует гибридный поиск: Мультикаст + Бродкаст + Фоновый сканер подсети.
 """
 import json
 import os
@@ -12,7 +12,8 @@ import threading
 import urllib.request
 import urllib.error
 import uuid
-import struct  # Нужен для работы с мультикаст-группами
+import struct
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import config_storage
@@ -25,7 +26,7 @@ DEFAULT_PORT = 8765          # HTTP-порт (host+client)
 DISCOVERY_PORT = 8766        # UDP discovery
 ELECTION_INTERVAL = 5.0      # секунд между broadcast'ами
 GRACE_PERIOD = 4.0           # сколько ждать, прежде чем election
-MISSING_HOST_TIMEOUT = 90    # секунд без host-announce → новый election
+MISSING_HOST_TIMEOUT = 90    # секунд без host-announce -> новый election
 HEARTBEAT_INTERVAL = 10      # секунд между heartbeat'ами клиента
 DISCOVERY_MAGIC = "ANTIGAME_DISCOVERY_V1"
 MULTICAST_GROUP = "239.255.255.250" # Стандартный мультикаст-адрес локальной сети
@@ -220,7 +221,16 @@ class NetworkAgent:
     def _make_broadcast_socket(self) -> socket.socket:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1) # Разрешаем Broadcast
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        
+        # Привязываем отправку к IP физического интерфейса
+        try:
+            if self.local_ip and self.local_ip != "127.0.0.1":
+                s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.local_ip))
+        except Exception:
+            pass
+
         s.settimeout(0.5)
         return s
 
@@ -241,9 +251,12 @@ class NetworkAgent:
     def _broadcast(self, sock: socket.socket, pkt: dict):
         try:
             data = json.dumps(pkt).encode("utf-8")
+            # 1. Отправка в Multicast
             sock.sendto(data, (MULTICAST_GROUP, DISCOVERY_PORT))
+            # 2. Дублирование в Broadcast
+            sock.sendto(data, ("255.255.255.255", DISCOVERY_PORT))
         except Exception as e:
-            logger.debug(f"multicast broadcast error: {e}")
+            logger.debug(f"broadcast error: {e}")
 
     def _collect_announces(self, sock: socket.socket, timeout: float) -> list:
         peers: list = []
@@ -264,7 +277,7 @@ class NetworkAgent:
         return peers
 
     def _scan_for_host(self):
-        """Быстрый фоновый перебор всей локальной подсети любой конфигурации."""
+        """Быстрый фоновый перебор всей локальной подсети с контролем количества потоков."""
         if self.host_url or self.role == "host":
             return
             
@@ -279,8 +292,24 @@ class NetworkAgent:
                 return
             url = f"http://{ip_str}:{self.local_port}/api/agents/{self.agent_id}/heartbeat"
             try:
-                req = urllib.request.Request(url, method="POST", headers={"Connection": "close"})
-                with urllib.request.urlopen(req, timeout=0.8) as r:
+                # Передаем полный пакет heartbeat прямо во время сканирования
+                body = json.dumps({
+                    "agent_id": self.agent_id,
+                    "agent_name": self._sync_agent_name(),
+                    "hostname": get_hostname(),
+                    "ip": self.local_ip,
+                    "is_monitoring": getattr(self.main, "is_monitoring", False),
+                    "auto_start": self.config.get("auto_start", True),
+                    "client_version": "1.0.0",
+                }).encode("utf-8")
+                
+                req = urllib.request.Request(
+                    url,
+                    data=body,
+                    headers={"Content-Type": "application/json", "Connection": "close"},
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=1.5) as r:
                     if r.getcode() == 200 and not self.host_url:
                         self.host_url = f"http://{ip_str}:{self.local_port}/"
                         self.role = "client"
@@ -288,11 +317,12 @@ class NetworkAgent:
             except Exception:
                 pass
 
-        # Сканируем весь диапазон хостов подсети (от 1 до 254)
-        for i in range(1, 255):
-            if self.host_url or self.role == "host": 
-                break
-            threading.Thread(target=check_ip, args=(f"{base_net}{i}",), daemon=True).start()
+        # Контролируемый пул из 25 потоков
+        with ThreadPoolExecutor(max_workers=25) as executor:
+            for i in range(1, 255):
+                if self.host_url or self.role == "host": 
+                    break
+                executor.submit(check_ip, f"{base_net}{i}")
 
     def _decide_role(self, peers: list, now: float):
         with self._election_lock:
@@ -319,7 +349,6 @@ class NetworkAgent:
                 self._last_host_seen = now
                 self._first_seen_others_ts = 0.0
 
-                # Если мы УЖЕ выступаем хостом и виден другой хост — уступаем только если мы не были первыми
                 if self.role == "host":
                     if self.agent_id == best["agent_id"]:
                         return
@@ -338,7 +367,7 @@ class NetworkAgent:
 
                 self.host_url = best.get("host_url") or self.host_url
                 if self.role != "client":
-                    logger.info(f"Нашёл host {best['agent_name']} → становлюсь клиентом")
+                    logger.info(f"Нашёл host {best['agent_name']} -> становлюсь клиентом")
                 self.role = "client"
                 return
 
@@ -346,15 +375,14 @@ class NetworkAgent:
                     and self.host_url
                     and self._last_host_seen > 0
                     and now - self._last_host_seen > MISSING_HOST_TIMEOUT):
-                logger.warning(f"Host {self.host_url} не отвечает — запускаю election")
+                logger.warning(f"Host {self.host_url} не отвечает, запускаю election")
                 self.host_url = None
 
-            # Если мы уже хост и других хостов нет — сохраняем роль без перевыборов
             if self.role == "host":
                 return
 
             if not live_clients:
-                logger.info(f"Я первый в сети → становлюсь HOST (http://{self.local_ip}:{self.local_port}/)")
+                logger.info(f"Я первый в сети -> становлюсь HOST (http://{self.local_ip}:{self.local_port}/)")
                 self._start_local_server()
                 self.role = "host"
                 self.host_url = f"http://{self.local_ip}:{self.local_port}/"
@@ -380,7 +408,7 @@ class NetworkAgent:
             winner = candidates[0]
             winner_id = winner["agent_id"]
             if winner_id == self.agent_id:
-                logger.info("Election: я — новый HOST")
+                logger.info("Election: я новый HOST")
                 self._start_local_server()
                 self.role = "host"
                 self.host_url = f"http://{self.local_ip}:{self.local_port}/"
@@ -460,9 +488,8 @@ class NetworkAgent:
                 except urllib.error.URLError as e:
                     consecutive_failures += 1
                     logger.warning(f"poll commands: host недоступен; попытка {consecutive_failures}")
-                    # Даем запасы на временные просадки Wi-Fi сети (5 попыток с паузой)
                     if consecutive_failures >= 5:
-                        logger.warning("host не отвечает 5 попыток подряд — запускаю election")
+                        logger.warning("host не отвечает 5 попыток подряд, запускаю election")
                         self.host_url = None
                     time.sleep(3.0)
                 except Exception as e:
@@ -571,7 +598,7 @@ class NetworkAgent:
         if self.role == "host":
             self._set_status(f"★ HOST (админка): http://{self.local_ip}:{self.local_port}/")
         elif self.role == "client" and self.host_url:
-            self._set_status(f"Клиент → {self.host_url}")
+            self._set_status(f"Клиент -> {self.host_url}")
         else:
             self._set_status(f"Ищу главного... (агентов в сети: {len(self._known_peers)})")
 

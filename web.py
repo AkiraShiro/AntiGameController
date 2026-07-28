@@ -85,6 +85,32 @@ header h1 {
   flex-wrap: wrap;
 }
 
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-main);
+  cursor: pointer;
+  user-select: none;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  transition: all 0.2s ease;
+}
+
+.checkbox-label:hover {
+  border-color: var(--neon-pink);
+  background: var(--neon-pink-dim);
+}
+
+.checkbox-label input {
+  cursor: pointer;
+  accent-color: var(--neon-pink);
+}
+
 /* Main Layout */
 main {
   padding: 24px 16px;
@@ -556,6 +582,10 @@ tr.offline .status-pill::before {
 <header>
   <h1>🛡️ Anti-Game Controller</h1>
   <div class="header-controls">
+    <label class="checkbox-label">
+      <input type="checkbox" id="onlyOnlineCheck" onchange="toggleOnlyOnline(this.checked)">
+      Только Online
+    </label>
     <span class="badge">Агентов: <span id="agentCount" style="color:#fff; margin-left:4px;">0</span></span>
     <span class="badge">Конфигов: <span id="configCount" style="color:#fff; margin-left:4px;">0</span></span>
     <button type="button" class="muted" onclick="location.reload()">⟳ Обновить</button>
@@ -644,6 +674,32 @@ tr.offline .status-pill::before {
 <script>
 let selectedConfigId = "";
 let cachedConfigs = [];
+
+// Cookie Helpers
+function setCookie(name, value, days = 365) {
+    const expires = new Date(Date.now() + days * 864e5).toUTCString();
+    document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/`;
+}
+
+function getCookie(name) {
+    return document.cookie.split('; ').reduce((acc, curr) => {
+        const [key, val] = curr.split('=');
+        return key === name ? decodeURIComponent(val || '') : acc;
+    }, '');
+}
+
+function initOnlineFilter() {
+    const saved = getCookie("only_online_filter");
+    const checkbox = document.getElementById("onlyOnlineCheck");
+    if (checkbox) {
+        checkbox.checked = saved === "true";
+    }
+}
+
+function toggleOnlyOnline(checked) {
+    setCookie("only_online_filter", checked);
+    loadAgents();
+}
 
 function toggleConfigPanel() {
     const panel = document.getElementById("configPanel");
@@ -905,7 +961,8 @@ async function loadAgents() {
     const data = await r.json();
     const tb = document.querySelector("#agentsTable tbody");
     tb.innerHTML = "";
-    document.getElementById("agentCount").textContent = data.agents ? data.agents.length : 0;
+
+    const onlyOnline = document.getElementById("onlyOnlineCheck") ? document.getElementById("onlyOnlineCheck").checked : false;
 
     const sortedAgents = (data.agents || []).sort((a, b) => {
       const aOnline = a.last_seen && (Date.now() / 1000 - a.last_seen < 90);
@@ -913,8 +970,16 @@ async function loadAgents() {
       return bOnline - aOnline;
     });
 
+    let renderedCount = 0;
+
     for (const a of sortedAgents) {
       const isOnline = a.last_seen && (Date.now()/1000 - a.last_seen < 90);
+      
+      if (onlyOnline && !isOnline) {
+        continue;
+      }
+      renderedCount++;
+
       const tr = document.createElement("tr");
       tr.className = isOnline ? "online" : "offline";
       const lastSeen = a.last_seen ? new Date(a.last_seen * 1000).toLocaleTimeString() : "Нет данных";
@@ -933,7 +998,7 @@ async function loadAgents() {
           </div>
         </td>
         <td data-label="Agent ID"><code style="color:var(--neon-pink); font-family:'JetBrains Mono', monospace;">${a.agent_id}</code></td>
-        <td data-label="IP">${a.ip || "—"}</td>
+        <td data-label="IP">${a.ip || "-"}</td>
         <td data-label="Защита">${a.is_monitoring ? '<span class="badge active">ВКЛ</span>' : '<span class="badge">ВЫКЛ</span>'}</td>
         <td data-label="Конфиг">
           <div class="select-wrapper" style="min-width:140px;">
@@ -954,6 +1019,7 @@ async function loadAgents() {
         </td>`;
       tb.appendChild(tr);
     }
+    document.getElementById("agentCount").textContent = renderedCount;
   } catch (e) {
     console.error(e);
   }
@@ -1003,6 +1069,8 @@ function toast(msg) {
   setTimeout(() => t.style.display = "none", 2500);
 }
 
+// Initialization
+initOnlineFilter();
 newConfig();
 loadConfigs();
 loadAgents();
