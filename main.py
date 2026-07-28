@@ -37,6 +37,8 @@ from autostart_manager import TaskSchedulerManager, AutostartManager
 from styles import DARK_THEME, LIGHT_THEME
 from network_agent import NetworkAgent
 from auto_updater import AutoUpdater
+from pynput.keyboard import Key, Controller
+import winreg
 
 import config_storage
 
@@ -233,20 +235,28 @@ class ChangeProfileDialog(QDialog):
 
 # -------------- Локскрин --------------
 
-
 class LockScreen(QWidget):
 
     def __init__(self):
         super().__init__()
         self.pressed_keys = set()
         self.allow_exit = False  # Флаг разрешения на закрытие
+
+        # Инициализация контроллера клавиатуры pynput
+        self.keyboard_controller = Controller()
+
+        # Настройка таймера для симуляции клика Esc
+        self.esc_timer = QTimer(self)
+        self.esc_timer.setInterval(100)  # Интервал в миллисекундах (100 мс = 10 раз в сек)
+        self.esc_timer.timeout.connect(self.press_esc_key)
+
         self.init_ui()
+
+        # Запускаем таймер после инициализации окна
+        self.esc_timer.start()
 
     def init_ui(self):
         # Комплекс флагов:
-        # - WindowStaysOnTopHint: поверх всех
-        # - FramelessWindowHint: без рамок
-        # - Tool: убирает иконку с панели задач (усложняет Alt+Tab)
         flags = (
             Qt.WindowStaysOnTopHint
             | Qt.FramelessWindowHint
@@ -260,7 +270,7 @@ class LockScreen(QWidget):
 
         # Визуальный интерфейс
         layout = QVBoxLayout()
-        label = QLabel("Фокус внимания", self) #G+Space to exit
+        label = QLabel("Фокус внимания", self)  # G+Space to exit
         label.setAlignment(Qt.AlignCenter)
         label.setStyleSheet("font-size: 28px; color: #ffffff; font-weight: bold;")
         layout.addWidget(label)
@@ -271,12 +281,19 @@ class LockScreen(QWidget):
         # Включаем перехват потери фокуса
         self.installEventFilter(self)
 
+    # Функция отправки нажатия Esc
+    def press_esc_key(self):
+        self.keyboard_controller.press(Key.esc)
+        self.keyboard_controller.release(Key.esc)
+
     # 1. Защита от Alt+F4 и стандартного закрытия
     def closeEvent(self, event):
         if self.allow_exit:
+            # Обязательно останавливаем таймер при выходе
+            self.esc_timer.stop()
             event.accept()
         else:
-            event.ignore()  # Игнорируем запрос на закрытие (Alt+F4 не сработает)
+            event.ignore()
 
     # 2. Обработка нажатий G + Space
     def keyPressEvent(self, event):
@@ -292,7 +309,7 @@ class LockScreen(QWidget):
         self.pressed_keys.discard(event.key())
         super().keyReleaseEvent(event)
 
-    # 3. Защита от Alt+Tab (возврат фокуса, если пользователь переключился)
+    # 3. Защита от Alt+Tab
     def changeEvent(self, event):
         if event.type() == QEvent.WindowStateChange:
             if self.isMinimized():
@@ -301,12 +318,14 @@ class LockScreen(QWidget):
         super().changeEvent(event)
 
     def eventFilter(self, obj, event):
-        # Если окно теряет фокус (например, из-за Alt+Tab) — возвращаем его на передний план
         if event.type() == QEvent.WindowDeactivate:
             self.activateWindow()
             self.raise_()
             return True
         return super().eventFilter(obj, event)
+
+
+
 
 
 # ----------------- Главное окно -----------------

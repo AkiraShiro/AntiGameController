@@ -1,6 +1,22 @@
+# Встроенный сервер + веб-админка для Anti-Game Controller.
 """
 Встроенный сервер + веб-админка для Anti-Game Controller.
+Используется, когда нет внешнего сервера — этот ПК становится
+«главным» и предоставляет админку остальным ноутбукам в локальной сети.
+Стек:
+- Python http.server (без внешних зависимостей)
+- HTML/CSS/JS (vanilla, без фреймворков) — шаблон ниже
+- Хранение состояния: SQLite (встроенный) или in-memory dict
+- Эндпоинты:
+    POST /api/agents/<id>/heartbeat
+    GET  /api/agents/<id>/commands?since=N
+    POST /api/agents/<id>/logs
+    GET  /api/agents
+    POST /api/agents/<id>/command
+    GET  /                         — веб-админка
+
 """
+
 import os
 import json
 import time
