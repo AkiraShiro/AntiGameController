@@ -1,20 +1,7 @@
-# Встроенный сервер + веб-админка для Anti-Game Controller.
 """
 Встроенный сервер + веб-админка для Anti-Game Controller.
-Используется, когда нет внешнего сервера — этот ПК становится
-«главным» и предоставляет админку остальным ноутбукам в локальной сети.
-Стек:
-- Python http.server (без внешних зависимостей)
-- HTML/CSS/JS (vanilla, без фреймворков) — шаблон ниже
-- Хранение состояния: SQLite (встроенный) или in-memory dict
-- Эндпоинты:
-    POST /api/agents/<id>/heartbeat
-    GET  /api/agents/<id>/commands?since=N
-    POST /api/agents/<id>/logs
-    GET  /api/agents
-    POST /api/agents/<id>/command
-    GET  /                         — веб-админка
-
+Используется, когда нет внешнего сервера: этот ПК становится
+главным и предоставляет админку остальным ноутбукам в локальной сети.
 """
 
 import os
@@ -26,7 +13,6 @@ import uuid
 import threading
 import sqlite3
 import socket
-import socketserver
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -35,12 +21,12 @@ from logger import get_logger
 logger = get_logger("NetServer")
 ONLINE_TIMEOUT_SECONDS = 90
 
-# --------------------- HTML-админка ---------------------
+# HTML-админка
 from web import html as ADMIN_HTML
-# --------------------- Хранилище ---------------------
+
 
 class Store:
-    """SQLite-backed хранилище агентов, команд и конфигов."""
+    """SQLite-backed хранилище агентов, команд и конфигов с автозакрытием соединений."""
 
     def __init__(self, path: str):
         self.path = path
@@ -48,88 +34,104 @@ class Store:
         self.lock = threading.Lock()
         self._init_db()
 
-    def _conn(self):
-        return sqlite3.connect(self.path, timeout=10.0, check_same_thread=False)
+    def _get_conn(self):
+        conn = sqlite3.connect(self.path, timeout=10.0, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        return conn
 
     def _init_db(self):
-        with self.lock, self._conn() as c:
-            c.executescript("""
-                CREATE TABLE IF NOT EXISTS agents (
-                    agent_id TEXT PRIMARY KEY,
-                    agent_name TEXT,
-                    hostname TEXT,
-                    ip TEXT,
-                    is_monitoring INTEGER,
-                    auto_start INTEGER,
-                    config_id TEXT,
-                    client_version TEXT,
-                    last_seen REAL
-                );
-                CREATE TABLE IF NOT EXISTS commands (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    agent_id TEXT,
-                    command TEXT,
-                    payload TEXT,
-                    created_at REAL,
-                    delivered_at REAL
-                );
-                CREATE TABLE IF NOT EXISTS configs (
-                    id TEXT PRIMARY KEY,
-                    name TEXT,
-                    body TEXT,
-                    created_at REAL
-                );
-                CREATE TABLE IF NOT EXISTS logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    agent_id TEXT,
-                    message TEXT,
-                    created_at REAL
-                );
-            """)
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                conn.executescript("""
+                    CREATE TABLE IF NOT EXISTS agents (
+                        agent_id TEXT PRIMARY KEY,
+                        agent_name TEXT,
+                        hostname TEXT,
+                        ip TEXT,
+                        is_monitoring INTEGER,
+                        auto_start INTEGER,
+                        config_id TEXT,
+                        client_version TEXT,
+                        last_seen REAL
+                    );
+                    CREATE TABLE IF NOT EXISTS commands (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        agent_id TEXT,
+                        command TEXT,
+                        payload TEXT,
+                        created_at REAL,
+                        delivered_at REAL
+                    );
+                    CREATE TABLE IF NOT EXISTS configs (
+                        id TEXT PRIMARY KEY,
+                        name TEXT,
+                        body TEXT,
+                        created_at REAL
+                    );
+                    CREATE TABLE IF NOT EXISTS logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        agent_id TEXT,
+                        message TEXT,
+                        created_at REAL
+                    );
+                """)
+                conn.commit()
+            finally:
+                conn.close()
 
     # --- агенты ---
 
     def upsert_agent(self, a: dict):
-        with self.lock, self._conn() as c:
-            c.execute(
-                """INSERT INTO agents
-                   (agent_id, agent_name, hostname, ip, is_monitoring,
-                    auto_start, client_version, last_seen)
-                   VALUES (?,?,?,?,?,?,?,?)
-                   ON CONFLICT(agent_id) DO UPDATE SET
-                     agent_name=excluded.agent_name,
-                     hostname=excluded.hostname,
-                     ip=excluded.ip,
-                     is_monitoring=excluded.is_monitoring,
-                     auto_start=excluded.auto_start,
-                     client_version=excluded.client_version,
-                     last_seen=excluded.last_seen
-                """,
-                (
-                    a["agent_id"], a.get("agent_name", ""),
-                    a.get("hostname", ""), a.get("ip", ""),
-                    int(bool(a.get("is_monitoring"))),
-                    int(bool(a.get("auto_start"))),
-                    a.get("client_version", ""),
-                    time.time(),
-                ),
-            )
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    """INSERT INTO agents
+                       (agent_id, agent_name, hostname, ip, is_monitoring,
+                        auto_start, client_version, last_seen)
+                       VALUES (?,?,?,?,?,?,?,?)
+                       ON CONFLICT(agent_id) DO UPDATE SET
+                         agent_name=excluded.agent_name,
+                         hostname=excluded.hostname,
+                         ip=excluded.ip,
+                         is_monitoring=excluded.is_monitoring,
+                         auto_start=excluded.auto_start,
+                         client_version=excluded.client_version,
+                         last_seen=excluded.last_seen
+                    """,
+                    (
+                        a["agent_id"], a.get("agent_name", ""),
+                        a.get("hostname", ""), a.get("ip", ""),
+                        int(bool(a.get("is_monitoring"))),
+                        int(bool(a.get("auto_start"))),
+                        a.get("client_version", ""),
+                        time.time(),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
     def list_agents(self):
-        with self.lock, self._conn() as c:
-            cur = c.execute(
-                """SELECT agent_id, agent_name, hostname, ip,
-                          is_monitoring, auto_start, config_id,
-                          client_version, last_seen
-                   FROM agents
-                   ORDER BY
-                     CASE WHEN agent_name IS NULL OR agent_name=''
-                          THEN 1 ELSE 0 END,
-                     LOWER(agent_name) ASC,
-                     agent_id ASC"""
-            )
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                cur = conn.execute(
+                    """SELECT agent_id, agent_name, hostname, ip,
+                              is_monitoring, auto_start, config_id,
+                              client_version, last_seen
+                       FROM agents
+                       ORDER BY
+                         CASE WHEN agent_name IS NULL OR agent_name=''
+                              THEN 1 ELSE 0 END,
+                         LOWER(agent_name) ASC,
+                         agent_id ASC"""
+                )
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, r)) for r in cur.fetchall()]
+            finally:
+                conn.close()
 
     def list_online_agents(self):
         now = time.time()
@@ -139,56 +141,76 @@ class Store:
         ]
 
     def set_agent_config(self, agent_id: str, config_id: str):
-        with self.lock, self._conn() as c:
-            c.execute(
-                "UPDATE agents SET config_id=? WHERE agent_id=?",
-                (config_id or None, agent_id),
-            )
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    "UPDATE agents SET config_id=? WHERE agent_id=?",
+                    (config_id or None, agent_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
     def set_agent_name(self, agent_id: str, agent_name: str):
-        with self.lock, self._conn() as c:
-            c.execute(
-                "UPDATE agents SET agent_name=? WHERE agent_id=?",
-                ((agent_name or "").strip(), agent_id),
-            )
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    "UPDATE agents SET agent_name=? WHERE agent_id=?",
+                    ((agent_name or "").strip(), agent_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
     # --- команды ---
 
     def enqueue_command(self, agent_id: str, command: str,
                         payload: dict | None = None):
-        with self.lock, self._conn() as c:
-            c.execute(
-                """INSERT INTO commands
-                   (agent_id, command, payload, created_at)
-                   VALUES (?,?,?,?)""",
-                (agent_id, command,
-                 json.dumps(payload or {}),
-                 time.time()),
-            )
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    """INSERT INTO commands
+                       (agent_id, command, payload, created_at)
+                       VALUES (?,?,?,?)""",
+                    (agent_id, command,
+                     json.dumps(payload or {}),
+                     time.time()),
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
     def fetch_commands(self, agent_id: str, since: float):
-        with self.lock, self._conn() as c:
-            cur = c.execute(
-                """SELECT id, command, payload, created_at
-                   FROM commands
-                   WHERE agent_id=? AND id > ? AND delivered_at IS NULL
-                   ORDER BY id""",
-                (agent_id, since),
-            )
-            rows = cur.fetchall()
-            if not rows:
-                return [], 0.0
-            last_id = rows[-1][0]
-            c.execute(
-                "UPDATE commands SET delivered_at=? WHERE id <= ? AND delivered_at IS NULL",
-                (time.time(), last_id),
-            )
-            return (
-                [{"id": r[0], "command": r[1],
-                  "payload": json.loads(r[2] or "{}"),
-                  "created_at": r[3]} for r in rows],
-                last_id,
-            )
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                cur = conn.execute(
+                    """SELECT id, command, payload, created_at
+                       FROM commands
+                       WHERE agent_id=? AND id > ? AND delivered_at IS NULL
+                       ORDER BY id""",
+                    (agent_id, since),
+                )
+                rows = cur.fetchall()
+                if not rows:
+                    return [], 0.0
+                last_id = rows[-1][0]
+                conn.execute(
+                    "UPDATE commands SET delivered_at=? WHERE id <= ? AND delivered_at IS NULL",
+                    (time.time(), last_id),
+                )
+                conn.commit()
+                return (
+                    [{"id": r[0], "command": r[1],
+                      "payload": json.loads(r[2] or "{}"),
+                      "created_at": r[3]} for r in rows],
+                    last_id,
+                )
+            finally:
+                conn.close()
 
     # --- конфиги ---
 
@@ -203,70 +225,97 @@ class Store:
                 body = {}
         if not isinstance(body, dict):
             body = {}
-        with self.lock, self._conn() as c:
-            c.execute(
-                """INSERT INTO configs (id, name, body, created_at)
-                   VALUES (?,?,?,?)
-                   ON CONFLICT(id) DO UPDATE SET
-                     name=excluded.name, body=excluded.body""",
-                (config_id, name, json.dumps(body), time.time()),
-            )
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    """INSERT INTO configs (id, name, body, created_at)
+                       VALUES (?,?,?,?)
+                       ON CONFLICT(id) DO UPDATE SET
+                         name=excluded.name, body=excluded.body""",
+                    (config_id, name, json.dumps(body), time.time()),
+                )
+                conn.commit()
+            finally:
+                conn.close()
         return config_id
 
     def delete_config(self, config_id: str):
-        with self.lock, self._conn() as c:
-            c.execute("DELETE FROM configs WHERE id=?", (config_id,))
-            c.execute("UPDATE agents SET config_id=NULL WHERE config_id=?", (config_id,))
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("DELETE FROM configs WHERE id=?", (config_id,))
+                conn.execute("UPDATE agents SET config_id=NULL WHERE config_id=?", (config_id,))
+                conn.commit()
+            finally:
+                conn.close()
         return True
 
     def list_configs(self):
-        with self.lock, self._conn() as c:
-            cur = c.execute(
-                "SELECT id, name, body, created_at FROM configs ORDER BY name"
-            )
-            cols = [d[0] for d in cur.description]
-            return [
-                {**dict(zip(cols, r)), "body": json.loads(r[2] or "{}")}
-                for r in cur.fetchall()
-            ]
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                cur = conn.execute(
+                    "SELECT id, name, body, created_at FROM configs ORDER BY name"
+                )
+                cols = [d[0] for d in cur.description]
+                return [
+                    {**dict(zip(cols, r)), "body": json.loads(r[2] or "{}")}
+                    for r in cur.fetchall()
+                ]
+            finally:
+                conn.close()
 
     def get_config(self, config_id: str):
-        with self.lock, self._conn() as c:
-            cur = c.execute(
-                "SELECT id, name, body FROM configs WHERE id=?",
-                (config_id,),
-            )
-            r = cur.fetchone()
-            if not r:
-                return None
-            return {"id": r[0], "name": r[1],
-                    "body": json.loads(r[2] or "{}")}
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                cur = conn.execute(
+                    "SELECT id, name, body FROM configs WHERE id=?",
+                    (config_id,),
+                )
+                r = cur.fetchone()
+                if not r:
+                    return None
+                return {"id": r[0], "name": r[1],
+                        "body": json.loads(r[2] or "{}")}
+            finally:
+                conn.close()
 
     # --- логи ---
 
     def add_log(self, agent_id: str, message: str):
-        with self.lock, self._conn() as c:
-            c.execute(
-                """INSERT INTO logs (agent_id, message, created_at)
-                   VALUES (?,?,?)""",
-                (agent_id, message, time.time()),
-            )
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    """INSERT INTO logs (agent_id, message, created_at)
+                       VALUES (?,?,?)""",
+                    (agent_id, message, time.time()),
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
     def recent_logs(self, limit: int = 100):
-        with self.lock, self._conn() as c:
-            cur = c.execute(
-                """SELECT agent_id, message, created_at
-                   FROM logs ORDER BY id DESC LIMIT ?""",
-                (limit,),
-            )
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, r)) for r in cur.fetchall()]
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                cur = conn.execute(
+                    """SELECT agent_id, message, created_at
+                       FROM logs ORDER BY id DESC LIMIT ?""",
+                    (limit,),
+                )
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, r)) for r in cur.fetchall()]
+            finally:
+                conn.close()
 
 
 # --------------------- HTTP-обработчик ---------------------
 
 class _Handler(BaseHTTPRequestHandler):
-    store: Store = None  # injected
+    store: Store = None
     admin_password_hash: str | None = None
     server_version = "AntiGameController/1.0"
 
@@ -456,7 +505,7 @@ class _ThreadedServer(ThreadingHTTPServer):
 
 
 def start_local_server(port: int, db_path: str, admin_password_hash: str | None = None):
-    """Запускает локальный сервер+админку в фоне."""
+    """Запускает локальный сервер и админку в фоне."""
     store = Store(db_path)
     _Handler.store = store
     _Handler.admin_password_hash = admin_password_hash

@@ -21,7 +21,7 @@ from logger import get_logger
 
 logger = get_logger("Agent")
 
-# --- сетевые параметры ---
+# Сетевые параметры
 DEFAULT_PORT = 8765          # HTTP-порт (host+client)
 DISCOVERY_PORT = 8766        # UDP discovery
 ELECTION_INTERVAL = 5.0      # секунд между broadcast'ами
@@ -55,11 +55,9 @@ def get_local_ip() -> str:
     try:
         hostname = socket.gethostname()
         infos = socket.gethostbyname_ex(hostname)
-        # Сначала ищем стандартные домашние/офисные подсети
         for ip in infos[2]:
             if (ip.startswith("192.168.") or ip.startswith("10.")) and ":" not in ip:
                 return ip
-        # Если не нашли, берем любой доступный физический
         for ip in infos[2]:
             if not any(ip.startswith(p) for p in BAD_PREFIXES) and ":" not in ip:
                 return ip
@@ -129,12 +127,16 @@ class NetworkAgent:
         self.role = "idle"               
         self.host_url: Optional[str] = None
         self._server = None
+        self._db_path = None
+        self._local_store = None
         self._known_peers: dict = {}
         self._first_seen_others_ts = 0.0
         self._election_lock = threading.Lock()
         self._last_client_tick = 0.0
         self._last_host_seen = 0.0
         self._command_cursor = 0.0
+        self._command_thread_active = False
+        self._scanner_active = False
 
     def _sync_agent_name(self):
         name = (self.config.get("agent_name") or "").strip()
@@ -173,7 +175,14 @@ class NetworkAgent:
         while self.running:
             try:
                 now = time.time()
-                self.local_ip = get_local_ip()  # Динамически обновляем текущий IP подсети
+                new_ip = get_local_ip()
+                if new_ip != self.local_ip:
+                    self.local_ip = new_ip
+                    try:
+                        out_sock.close()
+                    except Exception:
+                        pass
+                    out_sock = self._make_broadcast_socket()
 
                 is_host_now = (self.role == "host")
                 host_url_now = f"http://{self.local_ip}:{self.local_port}/" if is_host_now else (self.host_url or "")
@@ -201,7 +210,8 @@ class NetworkAgent:
                         threading.Thread(target=self._client_tick, daemon=True).start()
                         self._last_client_tick = now
 
-                    if not getattr(self, "_command_thread_active", False):
+                    if not self._command_thread_active:
+                        self._command_thread_active = True
                         threading.Thread(target=self._command_poll_loop, daemon=True).start()
 
                 self._update_status_label()
@@ -211,7 +221,10 @@ class NetworkAgent:
                 logger.exception(f"agent loop: {e}")
                 time.sleep(2.0)
 
-        out_sock.close()
+        try:
+            out_sock.close()
+        except Exception:
+            pass
         try:
             in_sock.close()
         except Exception:
@@ -221,10 +234,9 @@ class NetworkAgent:
     def _make_broadcast_socket(self) -> socket.socket:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1) # Разрешаем Broadcast
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
         
-        # Привязываем отправку к IP физического интерфейса
         try:
             if self.local_ip and self.local_ip != "127.0.0.1":
                 s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.local_ip))
@@ -251,9 +263,7 @@ class NetworkAgent:
     def _broadcast(self, sock: socket.socket, pkt: dict):
         try:
             data = json.dumps(pkt).encode("utf-8")
-            # 1. Отправка в Multicast
             sock.sendto(data, (MULTICAST_GROUP, DISCOVERY_PORT))
-            # 2. Дублирование в Broadcast
             sock.sendto(data, ("255.255.255.255", DISCOVERY_PORT))
         except Exception as e:
             logger.debug(f"broadcast error: {e}")
@@ -276,53 +286,58 @@ class NetworkAgent:
                 continue
         return peers
 
-    def _scan_for_host(self):
-        """Быстрый фоновый перебор всей локальной подсети с контролем количества потоков."""
-        if self.host_url or self.role == "host":
+    def _start_background_scan(self):
+        """Запускает сканирование сети в фоновом демоническом потоке без блокировки цикла."""
+        if self._scanner_active or self.host_url or self.role == "host":
             return
-            
-        local_ip = get_local_ip()
-        if local_ip == "127.0.0.1":
-            return
-            
-        base_net = ".".join(local_ip.split(".")[:3]) + "."
+        self._scanner_active = True
+        threading.Thread(target=self._scan_for_host_worker, daemon=True).start()
 
-        def check_ip(ip_str):
-            if self.host_url or self.role == "host":
+    def _scan_for_host_worker(self):
+        try:
+            local_ip = get_local_ip()
+            if local_ip == "127.0.0.1":
                 return
-            url = f"http://{ip_str}:{self.local_port}/api/agents/{self.agent_id}/heartbeat"
-            try:
-                # Передаем полный пакет heartbeat прямо во время сканирования
-                body = json.dumps({
-                    "agent_id": self.agent_id,
-                    "agent_name": self._sync_agent_name(),
-                    "hostname": get_hostname(),
-                    "ip": self.local_ip,
-                    "is_monitoring": getattr(self.main, "is_monitoring", False),
-                    "auto_start": self.config.get("auto_start", True),
-                    "client_version": "1.0.0",
-                }).encode("utf-8")
                 
-                req = urllib.request.Request(
-                    url,
-                    data=body,
-                    headers={"Content-Type": "application/json", "Connection": "close"},
-                    method="POST"
-                )
-                with urllib.request.urlopen(req, timeout=1.5) as r:
-                    if r.getcode() == 200 and not self.host_url:
-                        self.host_url = f"http://{ip_str}:{self.local_port}/"
-                        self.role = "client"
-                        logger.info(f"Фоновый сканер успешно обнаружил хост: {self.host_url}")
-            except Exception:
-                pass
+            base_net = ".".join(local_ip.split(".")[:3]) + "."
 
-        # Контролируемый пул из 25 потоков
-        with ThreadPoolExecutor(max_workers=25) as executor:
-            for i in range(1, 255):
-                if self.host_url or self.role == "host": 
-                    break
-                executor.submit(check_ip, f"{base_net}{i}")
+            def check_ip(ip_str):
+                if self.host_url or self.role == "host" or not self.running:
+                    return
+                url = f"http://{ip_str}:{self.local_port}/api/agents/{self.agent_id}/heartbeat"
+                try:
+                    body = json.dumps({
+                        "agent_id": self.agent_id,
+                        "agent_name": self._sync_agent_name(),
+                        "hostname": get_hostname(),
+                        "ip": self.local_ip,
+                        "is_monitoring": getattr(self.main, "is_monitoring", False),
+                        "auto_start": self.config.get("auto_start", True),
+                        "client_version": "1.0.0",
+                    }).encode("utf-8")
+                    
+                    req = urllib.request.Request(
+                        url,
+                        data=body,
+                        headers={"Content-Type": "application/json", "Connection": "close"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req, timeout=1.5) as r:
+                        if r.getcode() == 200 and not self.host_url:
+                            self.host_url = f"http://{ip_str}:{self.local_port}/"
+                            self.role = "client"
+                            self._last_host_seen = time.time()
+                            logger.info(f"Фоновый сканер успешно обнаружил хост: {self.host_url}")
+                except Exception:
+                    pass
+
+            with ThreadPoolExecutor(max_workers=25) as executor:
+                for i in range(1, 255):
+                    if self.host_url or self.role == "host" or not self.running: 
+                        break
+                    executor.submit(check_ip, f"{base_net}{i}")
+        finally:
+            self._scanner_active = False
 
     def _decide_role(self, peers: list, now: float):
         with self._election_lock:
@@ -343,6 +358,7 @@ class NetworkAgent:
                     return (0, float(sat), p.get("agent_id") or "")
                 return (1, 0.0, p.get("agent_id") or "")
 
+            # 1. Если видны хосты в UDP анонсах
             if live_hosts:
                 live_hosts.sort(key=started_key)
                 best = live_hosts[0]
@@ -357,30 +373,31 @@ class NetworkAgent:
                     self.role = "client"
                     self.host_url = best.get("host_url") or self.host_url
                     self._command_cursor = 0.0
-                    self._command_thread_active = False
                     return
                 
                 if self.host_url != best.get("host_url"):
                     logger.info("Хост изменился. Сбрасываем курсор команд.")
                     self._command_cursor = 0.0
-                    self._command_thread_active = False
 
                 self.host_url = best.get("host_url") or self.host_url
                 if self.role != "client":
-                    logger.info(f"Нашёл host {best['agent_name']} -> становлюсь клиентом")
+                    logger.info(f"Нашел host {best['agent_name']} -> становлюсь клиентом")
                 self.role = "client"
                 return
 
-            if (self.role == "client"
-                    and self.host_url
-                    and self._last_host_seen > 0
-                    and now - self._last_host_seen > MISSING_HOST_TIMEOUT):
-                logger.warning(f"Host {self.host_url} не отвечает, запускаю election")
-                self.host_url = None
+            # 2. Если мы клиент, у нас есть host_url и хост ответил недавно
+            if self.role == "client" and self.host_url:
+                if self._last_host_seen > 0 and (now - self._last_host_seen) > MISSING_HOST_TIMEOUT:
+                    logger.warning(f"Host {self.host_url} долго не отвечает ({int(now - self._last_host_seen)}с), запускаю election")
+                    self.host_url = None
+                else:
+                    return
 
+            # 3. Если уже хост и других хостов нет
             if self.role == "host":
                 return
 
+            # 4. В сети пока нет никого
             if not live_clients:
                 logger.info(f"Я первый в сети -> становлюсь HOST (http://{self.local_ip}:{self.local_port}/)")
                 self._start_local_server()
@@ -389,12 +406,13 @@ class NetworkAgent:
                 self._first_seen_others_ts = 0.0
                 return
 
+            # 5. Запуск выборов среди найденных клиентов
             if self._first_seen_others_ts == 0.0:
                 self._first_seen_others_ts = now
             elapsed = now - self._first_seen_others_ts
             
             if elapsed >= GRACE_PERIOD and not self.host_url:
-                self._scan_for_host()
+                self._start_background_scan()
                 
             if elapsed < GRACE_PERIOD:
                 return
@@ -433,9 +451,10 @@ class NetworkAgent:
                 password_hash = self.config.get("password_hash")
             self._server = start_local_server(self.local_port, db_path, password_hash)
             if self._server is None:
-                self._server = start_local_server(self.local_port + 1, db_path, password_hash)
+                fallback_port = self.local_port + 2 if self.local_port + 1 == DISCOVERY_PORT else self.local_port + 1
+                self._server = start_local_server(fallback_port, db_path, password_hash)
                 if self._server:
-                    self.local_port = self.local_port + 1
+                    self.local_port = fallback_port
         except Exception as e:
             logger.exception(f"start_local_server: {e}")
 
@@ -443,32 +462,30 @@ class NetworkAgent:
         if self._server is not None:
             try:
                 self._server.shutdown()
-            except Exception:
-                pass
+                self._server.server_close()
+            except Exception as e:
+                logger.debug(f"ошибка при закрытии сервера: {e}")
             self._server = None
 
     def _client_tick(self):
         try:
             heartbeat_data = self._heartbeat()
-            self._sync_configs(heartbeat_data.get("configs") if isinstance(heartbeat_data, dict) else None)
+            if heartbeat_data:
+                self._last_host_seen = time.time()
+                self._sync_configs(heartbeat_data.get("configs") if isinstance(heartbeat_data, dict) else None)
         except urllib.error.URLError as e:
             logger.warning(f"host недоступен: {e.reason}")
         except Exception as e:
             logger.exception(f"client_tick error: {e}")
 
-        if not getattr(self, "_command_thread_active", False):
+        if not self._command_thread_active:
+            self._command_thread_active = True
             threading.Thread(target=self._command_poll_loop, daemon=True).start()
 
     def _command_poll_loop(self):
-        if getattr(self, "_command_thread_active", False):
-            return
-        self._command_thread_active = True
         consecutive_failures = 0
-        
         try:
             while self.running:
-                if not getattr(self, "_command_thread_active", False):
-                    break
                 if not (self.role in ("host", "client") and self.host_url):
                     time.sleep(1.0)
                     continue
@@ -481,6 +498,7 @@ class NetworkAgent:
                         if cmds is None:
                             raise urllib.error.URLError("Ошибка сети или пустой ответ от хоста")
                         consecutive_failures = 0
+                        self._last_host_seen = time.time()
                     
                     for c in cmds:
                         self._dispatch(c)
@@ -519,7 +537,7 @@ class NetworkAgent:
         url = f"{self.host_url}api/agents/{self.agent_id}/commands?since={self._command_cursor}"
         data = self._http_json("GET", url, timeout=35)
         if data is None:
-            return []
+            return None
         self._command_cursor = max(self._command_cursor, float(data.get("server_ts") or self._command_cursor))
         return data.get("commands", [])
 

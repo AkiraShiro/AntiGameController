@@ -181,9 +181,12 @@ class AutoUpdater:
 
         bat_path = os.path.join(tempfile.gettempdir(), "antigame_updater.bat")
         
-        # Скрипт ждет завершения процесса, подменяет exe, запускает его и чистит за собой мусор
+        # Скрипт ждет завершения процесса, подменяет exe, запускает его и чистит за собой мусор.
+        # ВАЖНО: set _MEIPASS= сбрасывает путь к старой временной папке PyInstaller.
         script = f"""@echo off
 chcp 65001 > nul
+set _MEIPASS=
+set _MEIPASS2=
 timeout /t 2 /nobreak > nul
 :waitloop
 tasklist /FI "IMAGENAME eq {os.path.basename(current_exe)}" 2>NUL | find /I "{os.path.basename(current_exe)}" >NUL
@@ -209,7 +212,12 @@ del /Q "{bat_path}"
                 kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
                 kwargs["startupinfo"] = _hidden_startupinfo()
             
-            subprocess.Popen(["cmd", "/c", bat_path], **kwargs)
+            # Удаляем переменные PyInstaller из передаваемого окружения
+            env = os.environ.copy()
+            env.pop("_MEIPASS", None)
+            env.pop("_MEIPASS2", None)
+
+            subprocess.Popen(["cmd", "/c", bat_path], env=env, **kwargs)
             
             # Завершаем текущее приложение, чтобы освободить .exe файл для копирования
             logger.info("Завершаем процесс для проведения обновления...")
