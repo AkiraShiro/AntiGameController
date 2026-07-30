@@ -1296,11 +1296,11 @@ class MainWindow(QMainWindow):
             self.config.update(new_cfg)
             
             # Обновляем имя агента, если оно пришло
-            agent_name = self.config.get("agent_name", "")
-            if agent_name and getattr(self, "network_agent", None) is not None:
-                self.network_agent.apply_agent_name(agent_name)
-            if hasattr(self, "agent_id_edit"):
-                self.agent_id_edit.setText(agent_name)
+            # agent_name = self.config.get("agent_name", "")
+            # if agent_name and getattr(self, "network_agent", None) is not None:
+            #     self.network_agent.apply_agent_name(agent_name)
+            # if hasattr(self, "agent_id_edit"):
+            #     self.agent_id_edit.setText(agent_name)
 
             # Сохраняем обновленный конфиг
             if self.config_manager.save(self.config):
