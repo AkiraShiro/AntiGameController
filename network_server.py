@@ -473,8 +473,8 @@ class _Handler(BaseHTTPRequestHandler):
                         payload["config_id"] = config_id
                         payload["config"] = cfg.get("body", {})
                         self.store.set_agent_config(agent_id, config_id)
-                        if payload["config"].get("agent_name"):
-                            self.store.set_agent_name(agent_id, payload["config"].get("agent_name"))
+                        # if payload["config"].get("agent_name"):
+                        #     self.store.set_agent_name(agent_id, payload["config"].get("agent_name"))
             if cmd == "rename_agent":
                 agent_name = body.get("agent_name", "")
                 payload["agent_name"] = agent_name

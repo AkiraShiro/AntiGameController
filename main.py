@@ -647,6 +647,11 @@ class MainWindow(QMainWindow):
         open_admin_btn.clicked.connect(self._open_admin_in_browser)
         nl.addRow("", open_admin_btn)
 
+        self.force_host_btn = QPushButton("Сделать этот ПК главным (Хост)")
+        self.force_host_btn.clicked.connect(self.force_host_action)
+        nl.addRow("", self.force_host_btn)
+
+
         # QR-код для телефона/планшета
         self.qr_label = QLabel()
         self.qr_label.setFixedSize(180, 180)
@@ -1234,6 +1239,24 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.critical(self, "Ошибка", "Не удалось сохранить настройки")
 
+    def force_host_action(self):
+        """Обработка нажатия на кнопку принудительного хостинга с проверкой пароля."""
+        if not self._confirm_admin_password(
+            "Смена роли",
+            "Введите пароль для принудительного назначения этого ПК главным:",
+        ):
+            return
+        
+        if getattr(self, "network_agent", None) is not None:
+            self.network_agent.force_become_host()
+            QMessageBox.information(
+                self, "Успех", 
+                "Команда выполнена. В течение нескольких секунд этот ПК станет главным, а прошлый хост перейдет в режим клиента."
+            )
+            self.statusBar().showMessage("Этот ПК назначен главным", 3000)
+        else:
+            QMessageBox.warning(self, "Ошибка", "Сетевой агент не запущен.")
+
     def _restart_network_agent(self):
         """Перезапуск агента после смены настроек."""
         try:
@@ -1293,14 +1316,14 @@ class MainWindow(QMainWindow):
                 logger.warning("[server] получен пустой конфиг или неверная структура")
                 return
 
+            # --- НОВЫЙ КОД: Защита уникальных данных компьютера ---
+            # Эти ключи никогда не должны затираться общим шаблоном конфига
+            protected_keys = ["agent_id", "agent_name", "password_hash", "profile_name"]
+            for key in protected_keys:
+                new_cfg.pop(key, None) # Безопасно удаляем ключ из присланного конфига
+            # ------------------------------------------------------
+
             self.config.update(new_cfg)
-            
-            # Обновляем имя агента, если оно пришло
-            # agent_name = self.config.get("agent_name", "")
-            # if agent_name and getattr(self, "network_agent", None) is not None:
-            #     self.network_agent.apply_agent_name(agent_name)
-            # if hasattr(self, "agent_id_edit"):
-            #     self.agent_id_edit.setText(agent_name)
 
             # Сохраняем обновленный конфиг
             if self.config_manager.save(self.config):

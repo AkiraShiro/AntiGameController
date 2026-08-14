@@ -15,7 +15,8 @@ import uuid
 import struct
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
-
+import platform  # Добавляем для проверки ОС
+import hashlib   # Добавляем для создания короткого хеша из ID
 import config_storage
 from logger import get_logger
 
@@ -74,12 +75,35 @@ def get_hostname() -> str:
         return "unknown"
 
 
+def get_hardware_id() -> str:
+    """
+    Создает уникальный ID на основе операционной системы или "железа".
+    """
+    try:
+        # Пытаемся получить уникальный идентификатор установки Windows
+        if platform.system() == "Windows":
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as key:
+                machine_guid = winreg.QueryValueEx(key, "MachineGuid")[0]
+                # Создаем короткий хеш на основе ключа Windows (берем первые 12 символов)
+                return hashlib.md5(machine_guid.encode()).hexdigest()[:12]
+    except Exception as e:
+        logger.debug(f"Не удалось получить MachineGuid: {e}")
+        
+    # Резервный вариант: берем MAC-адрес сетевой карты компьютера
+    mac = uuid.getnode()
+    return hashlib.md5(str(mac).encode()).hexdigest()[:12]
+
+
 def _ensure_agent_id(config: dict) -> str:
-    aid = config.get("agent_id")
-    if not aid:
-        aid = uuid.uuid4().hex[:12]
-        config["agent_id"] = aid
-    return aid
+    """
+    Гарантирует, что у агента есть уникальный идентификатор.
+    Теперь он привязан к железу и не дублируется при копировании конфига.
+    """
+    hw_id = get_hardware_id()
+    # Обновляем ID в конфиге для текущей сессии
+    config["agent_id"] = hw_id
+    return hw_id
 
 
 def _ensure_started_at(config: dict) -> float:
@@ -119,7 +143,13 @@ class NetworkAgent:
         default_name = f"{get_hostname()}-{self.agent_id[-4:]}"
         self.agent_name = self.config.get("agent_name") or default_name
         self.config["agent_name"] = self.agent_name
-        self.started_at = _ensure_started_at(self.config)
+        
+        # Очищаем старое значение из конфига, если оно там застряло с прошлых запусков
+        if "started_at" in self.config:
+            self.config.pop("started_at", None)
+            
+        # Берем реальное время текущего запуска (не сохраняем в self.config!)
+        self.started_at = time.time()
 
         self.local_ip = get_local_ip()
         self.local_port = int(self.config.get("local_port", DEFAULT_PORT))
@@ -655,3 +685,16 @@ class NetworkAgent:
                     p.drawRect(int(x * scale), int(y * scale), max(1, int(scale) + 1), max(1, int(scale) + 1))
         p.end()
         return pix
+    def force_become_host(self):
+        """
+        Принудительно делает этот ПК главным.
+        Мы ставим время запуска на 1970 год, поэтому старый хост добровольно уступит место.
+        """
+        with self._election_lock:
+            self.started_at = 1.0
+            if self.role != "host":
+                logger.info("Принудительный захват роли HOST пользователем")
+                self._start_local_server()
+                self.role = "host"
+                self.host_url = f"http://{self.local_ip}:{self.local_port}/"
+                self._first_seen_others_ts = 0.0

@@ -127,9 +127,18 @@ class AutoUpdater:
         current = self.config.get("installed_version", CURRENT_VERSION)
         if not tag:
             return
-        if tag == current:
-            logger.debug(f"Уже установлена актуальная версия {tag}")
+
+        # НОВЫЙ КОД: Функция для правильного парсинга версий
+        import re
+        def parse_v(version_str):
+            # Извлекаем все числа из строки версии. "0.11" превратится в (0, 11)
+            return tuple(map(int, re.findall(r'\d+', str(version_str))))
+
+        # Если версия на GitHub меньше или равна текущей, то ничего не скачиваем
+        if parse_v(tag) <= parse_v(current):
+            logger.debug(f"Уже установлена актуальная или более новая версия (текущая: {current}, на сервере: {tag})")
             return
+
         logger.info(f"Доступна новая версия: {tag} (текущая {current})")
         asset = self._pick_asset(release)
         if not asset:
@@ -216,6 +225,14 @@ del /Q "{bat_path}"
             env = os.environ.copy()
             env.pop("_MEIPASS", None)
             env.pop("_MEIPASS2", None)
+
+            # Очищаем PATH от старой папки PyInstaller во избежание ошибки DLL
+            if hasattr(sys, '_MEIPASS'):
+                meipass_dir = sys._MEIPASS
+                path_list = env.get("PATH", "").split(os.pathsep)
+                # Оставляем только те пути, которые не совпадают со старым _MEIPASS
+                path_list = [p for p in path_list if p.lower() != meipass_dir.lower()]
+                env["PATH"] = os.pathsep.join(path_list)
 
             subprocess.Popen(["cmd", "/c", bat_path], env=env, **kwargs)
             
