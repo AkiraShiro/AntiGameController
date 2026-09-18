@@ -149,7 +149,7 @@ class NetworkAgent:
             self.config.pop("started_at", None)
             
         # Берем реальное время текущего запуска (не сохраняем в self.config!)
-        self.started_at = time.time()
+        self.started_at = 1.0 if self.config.get("host_mode", False) else time.time()
 
         self.local_ip = get_local_ip()
         self.local_port = int(self.config.get("local_port", DEFAULT_PORT))
@@ -371,6 +371,11 @@ class NetworkAgent:
 
     def _decide_role(self, peers: list, now: float):
         with self._election_lock:
+            if not self.config.get("host_mode", False) and self.role == "host":
+                self._stop_local_server()
+                self.role = "idle"
+                self.host_url = None
+
             live_hosts = [
                 p for p in peers
                 if p.get("is_host")
@@ -381,6 +386,14 @@ class NetworkAgent:
                 if (not p.get("is_host"))
                 and now - p.get("ts", 0) < MISSING_HOST_TIMEOUT
             ]
+
+            if self.config.get("host_mode", False) and self.role != "host":
+                logger.info("Включен постоянный режим HOST")
+                self._start_local_server()
+                self.role = "host"
+                self.host_url = f"http://{self.local_ip}:{self.local_port}/"
+                self._first_seen_others_ts = 0.0
+                return
 
             def started_key(p):
                 sat = p.get("started_at") or 0.0

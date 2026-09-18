@@ -79,6 +79,7 @@ class ConfigManager:
             "notification_message": "⚠️ Доступ запрещен!\n\nОбратитесь к преподавателю для получения доступа.",
             "enable_autostart": True,
             "enable_process_protection": True,
+            "host_mode": False,
             "theme": "dark",
         }
 
@@ -96,6 +97,7 @@ class ConfigManager:
 
                 decrypted_data = self.cipher.decrypt(encrypted_data)
                 config = json.loads(decrypted_data.decode('utf-8'))
+                config.setdefault("host_mode", False)
                 print(f"[DEBUG ConfigManager] Конфиг загружен:")
                 print(
                     f"  - Процессов: {len(config.get('blocked_processes', []))}")

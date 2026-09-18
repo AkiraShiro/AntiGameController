@@ -44,6 +44,7 @@ def _hidden_startupinfo():
 logger = get_logger("Updater")
 
 CHECK_INTERVAL = 6 * 3600   # 6 часов
+GITHUB_REPOSITORY = "AkiraShiro/antigamecontroller"
 
 
 class AutoUpdater:
@@ -52,8 +53,6 @@ class AutoUpdater:
         self.main = main_window
         self.running = False
         self.thread: threading.Thread | None = None
-        if "github_repo" not in self.config:
-            self.config["github_repo"] = "AkiraShiro/AntiGameController"  # по умолчанию, если не задан в конфиге
 
     # ----- публичный API -----
 
@@ -62,9 +61,6 @@ class AutoUpdater:
             return
         if not self.config.get("auto_update", True):
             logger.info("Автообновление отключено в конфиге")
-            return
-        if not self.config.get("github_repo"):
-            logger.info("github_repo не задан, автообновление выключено")
             return
         self.running = True
         self.thread = threading.Thread(target=self._loop, daemon=True)
@@ -104,7 +100,7 @@ class AutoUpdater:
         return ctx
 
     def _api_url(self) -> str:
-        repo = self.config.get("github_repo", "").strip()
+        repo = GITHUB_REPOSITORY
         if not repo or "/" not in repo:
             raise ValueError(
                 "github_repo не задан (формат: 'owner/repo')"

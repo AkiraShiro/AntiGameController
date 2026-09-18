@@ -187,10 +187,13 @@ def delete_profile(profile_id: str) -> bool:
 
 def export_to_clipboard_or_file(config: dict, file_path: str | None = None) -> str:
     """
-    Экспортирует конфиг (без password_hash) в указанный файл или
+    Экспортирует конфиг (без password_hash и agent_id) в указанный файл или
     возвращает строку, если file_path=None.
     """
-    safe = {k: v for k, v in config.items() if k != "password_hash"}
+    safe = {
+        k: v for k, v in config.items()
+        if k not in {"password_hash", "agent_id"}
+    }
     safe["_exported_by"] = "AntiGameController"
     safe["_export_version"] = "2.0"
     payload = json.dumps(safe, ensure_ascii=False, indent=4)

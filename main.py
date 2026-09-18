@@ -618,13 +618,11 @@ class MainWindow(QMainWindow):
         )
         nl.addRow("", self.auto_update_check)
 
-        self.github_repo_edit = QLineEdit(
-            self.config.get("github_repo", "")
+        self.host_mode_check = QCheckBox(
+            "Сделать этот ПК главным (HOST)"
         )
-        self.github_repo_edit.setPlaceholderText(
-            "owner/repo (например: danil-sirotyuk/AntiGameController)"
-        )
-        nl.addRow("GitHub репозиторий:", self.github_repo_edit)
+        self.host_mode_check.setChecked(self.config.get("host_mode", False))
+        nl.addRow("Роль в сети:", self.host_mode_check)
 
         self.net_status_label = QLabel(
             "Запускается… (если этот ноутбук первый в сети, "
@@ -1055,6 +1053,7 @@ class MainWindow(QMainWindow):
         self.protection_check.setChecked(
             self.config.get("enable_process_protection", True)
         )
+        self.host_mode_check.setChecked(self.config.get("host_mode", False))
         self.theme_combo.setCurrentIndex(
             0 if self.config.get("theme", "dark") == "dark" else 1
         )
@@ -1226,7 +1225,7 @@ class MainWindow(QMainWindow):
         new_agent_name = self.agent_id_edit.text().strip()
         self.config["agent_name"] = new_agent_name
         self.config["auto_update"] = self.auto_update_check.isChecked()
-        self.config["github_repo"] = self.github_repo_edit.text().strip()
+        self.config["host_mode"] = self.host_mode_check.isChecked()
         if self.config_manager.save(self.config):
             if getattr(self, "network_agent", None) is not None:
                 self.network_agent.apply_agent_name(new_agent_name)
