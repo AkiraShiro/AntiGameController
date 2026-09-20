@@ -97,13 +97,20 @@ def get_hardware_id() -> str:
 
 def _ensure_agent_id(config: dict) -> str:
     """
-    Гарантирует, что у агента есть уникальный идентификатор.
-    Теперь он привязан к железу и не дублируется при копировании конфига.
+    Возвращает постоянный ID агента.
+    Старые hardware-ID заменяются на UUID, чтобы копии системы не совпадали.
     """
-    hw_id = get_hardware_id()
-    # Обновляем ID в конфиге для текущей сессии
-    config["agent_id"] = hw_id
-    return hw_id
+    current_id = str(config.get("agent_id") or "").strip().lower()
+    is_legacy_hardware_id = (
+        len(current_id) == 12
+        and all(char in "0123456789abcdef" for char in current_id)
+    )
+    if current_id and not is_legacy_hardware_id:
+        return current_id
+
+    new_id = uuid.uuid4().hex
+    config["agent_id"] = new_id
+    return new_id
 
 
 def _ensure_started_at(config: dict) -> float:
@@ -114,7 +121,7 @@ def _ensure_started_at(config: dict) -> float:
     return float(sat)
 
 
-def _make_announce(is_host: bool, host_url: str,
+def _make_announce(is_host: bool, host_url: str, host_mode: bool,
                    agent_id: str, agent_name: str,
                    started_at: float) -> dict:
     return {
@@ -124,6 +131,7 @@ def _make_announce(is_host: bool, host_url: str,
         "hostname": get_hostname(),
         "ip": get_local_ip(),
         "is_host": is_host,
+        "host_mode": host_mode,
         "host_url": host_url,
         "started_at": float(started_at or 0.0),
         "ts": time.time(),
@@ -140,6 +148,12 @@ class NetworkAgent:
         self.thread: Optional[threading.Thread] = None
 
         self.agent_id = _ensure_agent_id(self.config)
+        if self.config.get("agent_id") != self.agent_id:
+            self.config["agent_id"] = self.agent_id
+        try:
+            self.main.config_manager.save(self.config)
+        except Exception:
+            logger.exception("Не удалось сохранить новый agent_id")
         default_name = f"{get_hostname()}-{self.agent_id[-4:]}"
         self.agent_name = self.config.get("agent_name") or default_name
         self.config["agent_name"] = self.agent_name
@@ -167,6 +181,8 @@ class NetworkAgent:
         self._command_cursor = 0.0
         self._command_thread_active = False
         self._scanner_active = False
+        self._last_scan_started = 0.0
+        self._last_ip_check = 0.0
 
     def _sync_agent_name(self):
         name = (self.config.get("agent_name") or "").strip()
@@ -205,7 +221,11 @@ class NetworkAgent:
         while self.running:
             try:
                 now = time.time()
-                new_ip = get_local_ip()
+                if now - self._last_ip_check >= 30.0:
+                    new_ip = get_local_ip()
+                    self._last_ip_check = now
+                else:
+                    new_ip = self.local_ip
                 if new_ip != self.local_ip:
                     self.local_ip = new_ip
                     try:
@@ -220,6 +240,7 @@ class NetworkAgent:
                 pkt = _make_announce(
                     is_host=is_host_now,
                     host_url=host_url_now,
+                    host_mode=bool(self.config.get("host_mode", False)),
                     agent_id=self.agent_id,
                     agent_name=self._sync_agent_name(),
                     started_at=self.started_at,
@@ -310,7 +331,8 @@ class NetworkAgent:
                 break
             try:
                 pkt = json.loads(data.decode("utf-8"))
-                if pkt.get("magic") == DISCOVERY_MAGIC and pkt.get("agent_id") != self.agent_id:
+                if pkt.get("magic") == DISCOVERY_MAGIC:
+                    pkt["_source_ip"] = _addr[0]
                     peers.append(pkt)
             except Exception:
                 continue
@@ -318,8 +340,15 @@ class NetworkAgent:
 
     def _start_background_scan(self):
         """Запускает сканирование сети в фоновом демоническом потоке без блокировки цикла."""
-        if self._scanner_active or self.host_url or self.role == "host":
+        now = time.time()
+        if (
+            self._scanner_active
+            or self.host_url
+            or self.role == "host"
+            or now - self._last_scan_started < 300.0
+        ):
             return
+        self._last_scan_started = now
         self._scanner_active = True
         threading.Thread(target=self._scan_for_host_worker, daemon=True).start()
 
@@ -361,7 +390,7 @@ class NetworkAgent:
                 except Exception:
                     pass
 
-            with ThreadPoolExecutor(max_workers=25) as executor:
+            with ThreadPoolExecutor(max_workers=8) as executor:
                 for i in range(1, 255):
                     if self.host_url or self.role == "host" or not self.running: 
                         break
@@ -371,6 +400,27 @@ class NetworkAgent:
 
     def _decide_role(self, peers: list, now: float):
         with self._election_lock:
+            duplicate = next(
+                (
+                    peer for peer in peers
+                    if peer.get("agent_id") == self.agent_id
+                    and peer.get("_source_ip") not in {None, self.local_ip}
+                ),
+                None,
+            )
+            if duplicate is not None:
+                old_id = self.agent_id
+                self.agent_id = uuid.uuid4().hex
+                self.config["agent_id"] = self.agent_id
+                try:
+                    self.main.config_manager.save(self.config)
+                except Exception:
+                    logger.exception("Не удалось сохранить заменённый agent_id")
+                logger.warning(
+                    "Обнаружен дубликат agent_id %s от %s, назначен новый ID %s",
+                    old_id, duplicate.get("_source_ip"), self.agent_id,
+                )
+
             if not self.config.get("host_mode", False) and self.role == "host":
                 self._stop_local_server()
                 self.role = "idle"
@@ -381,6 +431,10 @@ class NetworkAgent:
                 if p.get("is_host")
                 and now - p.get("ts", 0) < MISSING_HOST_TIMEOUT
             ]
+
+            preferred_hosts = [p for p in live_hosts if p.get("host_mode")]
+            if preferred_hosts:
+                live_hosts = preferred_hosts
             live_clients = [
                 p for p in peers
                 if (not p.get("is_host"))

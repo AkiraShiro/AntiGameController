@@ -588,6 +588,7 @@ tr.offline .status-pill::before {
     </label>
     <span class="badge">Агентов: <span id="agentCount" style="color:#fff; margin-left:4px;">0</span></span>
     <span class="badge">Конфигов: <span id="configCount" style="color:#fff; margin-left:4px;">0</span></span>
+    <button type="button" class="danger" onclick="cleanupOfflineAgents()">🧹 Очистить offline</button>
     <button type="button" class="muted" onclick="location.reload()">⟳ Обновить</button>
   </div>
 </header>
@@ -1023,6 +1024,16 @@ async function loadAgents() {
   } catch (e) {
     console.error(e);
   }
+}
+
+async function cleanupOfflineAgents() {
+  if (!confirm("Удалить компьютеры, которые не отвечали более 90 секунд?")) {
+    return;
+  }
+  const r = await fetch("/api/agents/cleanup-offline", {method: "POST"});
+  const data = await r.json();
+  toast(`Удалено offline: ${data.removed || 0}`);
+  await loadAgents();
 }
 
 async function cmd(agentId, command) {

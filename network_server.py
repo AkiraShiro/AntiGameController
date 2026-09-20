@@ -36,7 +36,8 @@ class Store:
 
     def _get_conn(self):
         conn = sqlite3.connect(self.path, timeout=10.0, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA journal_mode=DELETE;")
+        conn.execute("PRAGMA busy_timeout=10000;")
         return conn
 
     def _init_db(self):
@@ -139,6 +140,35 @@ class Store:
             a for a in self.list_agents()
             if now - float(a.get("last_seen") or 0) <= ONLINE_TIMEOUT_SECONDS
         ]
+
+    def delete_offline_agents(self, timeout_seconds: int = ONLINE_TIMEOUT_SECONDS) -> int:
+        cutoff = time.time() - timeout_seconds
+        with self.lock:
+            conn = self._get_conn()
+            try:
+                cur = conn.execute(
+                    "SELECT agent_id FROM agents WHERE last_seen < ? OR last_seen IS NULL",
+                    (cutoff,),
+                )
+                agent_ids = [row[0] for row in cur.fetchall()]
+                if agent_ids:
+                    placeholders = ",".join("?" for _ in agent_ids)
+                    conn.execute(
+                        f"DELETE FROM commands WHERE agent_id IN ({placeholders})",
+                        agent_ids,
+                    )
+                    conn.execute(
+                        f"DELETE FROM logs WHERE agent_id IN ({placeholders})",
+                        agent_ids,
+                    )
+                    conn.execute(
+                        f"DELETE FROM agents WHERE agent_id IN ({placeholders})",
+                        agent_ids,
+                    )
+                    conn.commit()
+                return len(agent_ids)
+            finally:
+                conn.close()
 
     def set_agent_config(self, agent_id: str, config_id: str):
         with self.lock:
@@ -457,6 +487,12 @@ class _Handler(BaseHTTPRequestHandler):
             body = self._read_json()
             self.store.add_log(agent_id, body.get("message", ""))
             self._send_json(200, {"ok": True})
+            return
+        if path == "/api/agents/cleanup-offline":
+            if not self._require_admin_auth():
+                return
+            removed = self.store.delete_offline_agents()
+            self._send_json(200, {"ok": True, "removed": removed})
             return
         if path.startswith("/api/agents/") and path.endswith("/command"):
             if not self._require_admin_auth():

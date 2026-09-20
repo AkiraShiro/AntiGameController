@@ -247,7 +247,7 @@ class LockScreen(QWidget):
 
         # Настройка таймера для симуляции клика Esc
         self.esc_timer = QTimer(self)
-        self.esc_timer.setInterval(100)  # Интервал в миллисекундах (100 мс = 10 раз в сек)
+        self.esc_timer.setInterval(500)  # Достаточно для подавления Esc без лишней нагрузки
         self.esc_timer.timeout.connect(self.press_esc_key)
 
         self.init_ui()
@@ -1317,7 +1317,10 @@ class MainWindow(QMainWindow):
 
             # --- НОВЫЙ КОД: Защита уникальных данных компьютера ---
             # Эти ключи никогда не должны затираться общим шаблоном конфига
-            protected_keys = ["agent_id", "agent_name", "password_hash", "profile_name"]
+            protected_keys = [
+                "agent_id", "agent_name", "password_hash", "profile_name",
+                "host_mode",
+            ]
             for key in protected_keys:
                 new_cfg.pop(key, None) # Безопасно удаляем ключ из присланного конфига
             # ------------------------------------------------------
