@@ -1086,7 +1086,7 @@ newConfig();
 loadConfigs();
 loadAgents();
 setInterval(loadConfigs, 15000);
-setInterval(loadAgents, 5000);
+setInterval(loadAgents, 2000);
 </script>
 </body>
 </html>'''

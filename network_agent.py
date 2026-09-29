@@ -122,6 +122,7 @@ def _ensure_started_at(config: dict) -> float:
 
 
 def _make_announce(is_host: bool, host_url: str, host_mode: bool,
+                   local_ip: str,
                    agent_id: str, agent_name: str,
                    started_at: float) -> dict:
     return {
@@ -129,7 +130,7 @@ def _make_announce(is_host: bool, host_url: str, host_mode: bool,
         "agent_id": agent_id,
         "agent_name": agent_name,
         "hostname": get_hostname(),
-        "ip": get_local_ip(),
+        "ip": local_ip,
         "is_host": is_host,
         "host_mode": host_mode,
         "host_url": host_url,
@@ -162,8 +163,8 @@ class NetworkAgent:
         if "started_at" in self.config:
             self.config.pop("started_at", None)
             
-        # Берем реальное время текущего запуска (не сохраняем в self.config!)
-        self.started_at = 1.0 if self.config.get("host_mode", False) else time.time()
+        # Время запуска всегда отражает фактический запуск процесса.
+        self.started_at = time.time()
 
         self.local_ip = get_local_ip()
         self.local_port = int(self.config.get("local_port", DEFAULT_PORT))
@@ -241,6 +242,7 @@ class NetworkAgent:
                     is_host=is_host_now,
                     host_url=host_url_now,
                     host_mode=bool(self.config.get("host_mode", False)),
+                    local_ip=self.local_ip,
                     agent_id=self.agent_id,
                     agent_name=self._sync_agent_name(),
                     started_at=self.started_at,
@@ -332,7 +334,13 @@ class NetworkAgent:
             try:
                 pkt = json.loads(data.decode("utf-8"))
                 if pkt.get("magic") == DISCOVERY_MAGIC:
-                    pkt["_source_ip"] = _addr[0]
+                    source_ip = _addr[0]
+                    if (
+                        pkt.get("agent_id") == self.agent_id
+                        and source_ip == self.local_ip
+                    ):
+                        continue
+                    pkt["_source_ip"] = source_ip
                     peers.append(pkt)
             except Exception:
                 continue
@@ -441,24 +449,40 @@ class NetworkAgent:
                 and now - p.get("ts", 0) < MISSING_HOST_TIMEOUT
             ]
 
-            if self.config.get("host_mode", False) and self.role != "host":
-                logger.info("Включен постоянный режим HOST")
-                self._start_local_server()
-                self.role = "host"
-                self.host_url = f"http://{self.local_ip}:{self.local_port}/"
-                self._first_seen_others_ts = 0.0
-                return
-
             def started_key(p):
                 sat = p.get("started_at") or 0.0
                 if sat and sat > 0:
-                    return (0, float(sat), p.get("agent_id") or "")
-                return (1, 0.0, p.get("agent_id") or "")
+                    return (
+                        0 if p.get("host_mode") else 1,
+                        float(sat),
+                        p.get("agent_id") or "",
+                    )
+                return (
+                    0 if p.get("host_mode") else 1,
+                    0.0,
+                    p.get("agent_id") or "",
+                )
 
             # 1. Если видны хосты в UDP анонсах
             if live_hosts:
                 live_hosts.sort(key=started_key)
                 best = live_hosts[0]
+                local_host_candidate = {
+                    "agent_id": self.agent_id,
+                    "host_mode": bool(self.config.get("host_mode", False)),
+                    "started_at": self.started_at,
+                }
+                if (
+                    local_host_candidate["host_mode"]
+                    and started_key(local_host_candidate) < started_key(best)
+                ):
+                    if self.role != "host":
+                        logger.info("Этот ПК имеет приоритет HOST перед %s", best.get("agent_name", "peer"))
+                        self._start_local_server()
+                        self.role = "host"
+                        self.host_url = f"http://{self.local_ip}:{self.local_port}/"
+                    self._first_seen_others_ts = 0.0
+                    return
                 self._last_host_seen = now
                 self._first_seen_others_ts = 0.0
 
@@ -480,6 +504,14 @@ class NetworkAgent:
                 if self.role != "client":
                     logger.info(f"Нашел host {best['agent_name']} -> становлюсь клиентом")
                 self.role = "client"
+                return
+
+            if self.config.get("host_mode", False) and self.role != "host":
+                logger.info("Включен режим HOST: активных HOST в сети нет")
+                self._start_local_server()
+                self.role = "host"
+                self.host_url = f"http://{self.local_ip}:{self.local_port}/"
+                self._first_seen_others_ts = 0.0
                 return
 
             # 2. Если мы клиент, у нас есть host_url и хост ответил недавно
@@ -599,6 +631,9 @@ class NetworkAgent:
                     
                     for c in cmds:
                         self._dispatch(c)
+
+                    # Не превращаем опрос команд в busy-loop, когда очередь пуста.
+                    time.sleep(0.5)
                         
                 except urllib.error.URLError as e:
                     consecutive_failures += 1
@@ -759,6 +794,11 @@ class NetworkAgent:
         """
         with self._election_lock:
             self.started_at = 1.0
+            self.config["host_mode"] = True
+            try:
+                self.main.config_manager.save(self.config)
+            except Exception:
+                logger.exception("Не удалось сохранить принудительный режим HOST")
             if self.role != "host":
                 logger.info("Принудительный захват роли HOST пользователем")
                 self._start_local_server()
