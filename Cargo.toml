@@ -1,0 +1,43 @@
+[package]
+name = "anti_game_controller"
+version = "0.14.0"
+edition = "2021"
+
+[[bin]]
+name = "uninstaller"
+path = "src/bin/uninstaller.rs"
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde", "clock"] }
+eframe = "0.29"
+egui = "0.29"
+fernet = "0.2"
+hex = "0.4"
+hostname = "0.4"
+image = "0.25"
+md-5 = "0.10"
+pbkdf2 = "0.12"
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sysinfo = "0.32"
+tiny_http = "0.12"
+uuid = { version = "1", features = ["v4", "serde"] }
+webbrowser = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging"
+] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
