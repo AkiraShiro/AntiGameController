@@ -185,6 +185,11 @@ class AutoUpdater:
             current_exe = os.path.abspath(sys.argv[0])
 
         bat_path = os.path.join(tempfile.gettempdir(), "antigame_updater.bat")
+        marker_dir = os.path.join(tempfile.gettempdir(), "AntiGameController")
+        os.makedirs(marker_dir, exist_ok=True)
+        update_marker = os.path.join(marker_dir, "update.pending")
+        with open(update_marker, "w", encoding="ascii") as marker:
+            marker.write(new_version)
         
         # Скрипт ждет завершения процесса, подменяет exe, запускает его и чистит за собой мусор.
         # ВАЖНО: set _MEIPASS= сбрасывает путь к старой временной папке PyInstaller.
@@ -200,6 +205,7 @@ if "%ERRORLEVEL%"=="0" (
     goto waitloop
 )
 copy /Y "{new_exe}" "{current_exe}" > nul
+del /Q "{update_marker}" > nul
 start "" "{current_exe}"
 del /Q "{new_exe}" > nul
 del /Q "{bat_path}"
@@ -234,6 +240,11 @@ del /Q "{bat_path}"
             
             # Завершаем текущее приложение, чтобы освободить .exe файл для копирования
             logger.info("Завершаем процесс для проведения обновления...")
+            try:
+                import watchdog
+                watchdog.mark_main_shutting_down()
+            except Exception:
+                pass
             os._exit(0)
 
         except Exception as e:

@@ -87,6 +87,40 @@ class Store:
         with self.lock:
             conn = self._get_conn()
             try:
+                agent_id = str(a["agent_id"])
+                hostname = str(a.get("hostname") or "").strip()
+                ip = str(a.get("ip") or "").strip()
+                merge_config_id = None
+
+                if hostname and ip:
+                    duplicate_ids = [
+                        row[0]
+                        for row in conn.execute(
+                            """SELECT agent_id FROM agents
+                               WHERE agent_id != ? AND hostname = ? AND ip = ?""",
+                            (agent_id, hostname, ip),
+                        )
+                    ]
+                    for duplicate_id in duplicate_ids:
+                        row = conn.execute(
+                            "SELECT config_id FROM agents WHERE agent_id=?",
+                            (duplicate_id,),
+                        ).fetchone()
+                        if row and row[0]:
+                            merge_config_id = str(row[0])
+                        conn.execute(
+                            "UPDATE commands SET agent_id=? WHERE agent_id=?",
+                            (agent_id, duplicate_id),
+                        )
+                        conn.execute(
+                            "UPDATE logs SET agent_id=? WHERE agent_id=?",
+                            (agent_id, duplicate_id),
+                        )
+                        conn.execute(
+                            "DELETE FROM agents WHERE agent_id=?",
+                            (duplicate_id,),
+                        )
+
                 conn.execute(
                     """INSERT INTO agents
                        (agent_id, agent_name, hostname, ip, is_monitoring,
@@ -110,6 +144,11 @@ class Store:
                         time.time(),
                     ),
                 )
+                if merge_config_id:
+                    conn.execute(
+                        "UPDATE agents SET config_id=COALESCE(config_id, ?) WHERE agent_id=?",
+                        (merge_config_id, agent_id),
+                    )
                 conn.commit()
             finally:
                 conn.close()
@@ -560,7 +599,12 @@ def start_local_server(port: int, db_path: str, admin_password_hash: str | None 
 
 
 def get_local_ip() -> str:
-    BAD_PREFIXES = ("127.", "0.", "172.0.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.30.", "172.31.")
+    BAD_PREFIXES = (
+        "127.", "0.",
+        "172.0.", "172.16.", "172.17.", "172.18.", "172.19.",
+        "172.20.", "172.30.", "172.31.",
+        "192.168.56.", "192.168.122.", "169.254.",
+    )
     for test_target in [("8.8.8.8", 80), ("1.1.1.1", 80)]:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -576,7 +620,11 @@ def get_local_ip() -> str:
         hostname = socket.gethostname()
         infos = socket.gethostbyname_ex(hostname)
         for ip in infos[2]:
-            if (ip.startswith("192.168.") or ip.startswith("10.")) and ":" not in ip:
+            if (
+                (ip.startswith("192.168.") or ip.startswith("10."))
+                and not any(ip.startswith(p) for p in BAD_PREFIXES)
+                and ":" not in ip
+            ):
                 return ip
     except Exception:
         pass

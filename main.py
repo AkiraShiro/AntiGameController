@@ -39,6 +39,7 @@ from network_agent import NetworkAgent
 from auto_updater import AutoUpdater
 from pynput.keyboard import Key, Controller
 import winreg
+import watchdog
 
 import config_storage
 
@@ -1483,6 +1484,7 @@ class MainWindow(QMainWindow):
             logger.error(f"Ошибка при обновлении статуса UI: {e}")
 
     def _shutdown_application(self):
+        watchdog.mark_main_shutting_down()
         try:
             self._integrity_guard_running = False
         except Exception:
@@ -1678,8 +1680,17 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    if watchdog.run_watchdog_if_requested():
+        return
+
+    if watchdog.run_as_random_instance():
+        return
+
     if not _acquire_single_instance_lock():
         return
+
+    watchdog.spawn_watchdog(os.getpid())
+
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     w = MainWindow()

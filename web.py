@@ -675,6 +675,7 @@ tr.offline .status-pill::before {
 <script>
 let selectedConfigId = "";
 let cachedConfigs = [];
+let configEditorDirty = false;
 
 // Cookie Helpers
 function setCookie(name, value, days = 365) {
@@ -711,6 +712,10 @@ function toggleConfigPanel() {
     } else {
         btn.textContent = "[ Развернуть ]";
     }
+}
+
+function markConfigEditorDirty() {
+    configEditorDirty = true;
 }
 
 function defaultConfigBody() {
@@ -777,6 +782,9 @@ function onConfigDropdownChange(val) {
 }
 
 async function loadConfigs() {
+    if (configEditorDirty) {
+        return;
+    }
     try {
         const r = await fetch("/api/configs");
         const data = await r.json();
@@ -809,6 +817,7 @@ async function loadConfigIntoEditor(configId) {
     document.getElementById("agentName").value = body.agent_name || "";
     document.getElementById("configBody").value = JSON.stringify(body, null, 2);
     validateJsonLive();
+    configEditorDirty = false;
     renderConfigDropdown();
 }
 
@@ -818,6 +827,7 @@ function newConfig() {
     document.getElementById("agentName").value = "";
     document.getElementById("configBody").value = defaultConfigBody();
     validateJsonLive();
+    configEditorDirty = false;
     renderConfigDropdown();
 }
 
@@ -848,6 +858,7 @@ async function saveConfig() {
         return;
     }
     selectedConfigId = data.id;
+    configEditorDirty = false;
     toast("Конфиг сохранён");
     await loadConfigs();
     await loadConfigIntoEditor(selectedConfigId);
@@ -888,6 +899,7 @@ async function importConfigFile(event) {
         document.getElementById("configBody").value = JSON.stringify(data, null, 2);
     }
     selectedConfigId = "";
+    configEditorDirty = true;
     validateJsonLive();
     renderConfigDropdown();
     toast("JSON загружен в редактор");
@@ -952,8 +964,9 @@ async function exportAllConfigs() {
 }
 
 async function loadAgents() {
-  // Защита от сброса имени: если фокус на инпуте редактирования имени — пропускаем перерисовку DOM
-  if (document.activeElement && document.activeElement.id && document.activeElement.id.startsWith("agentName_")) {
+  // Не пересоздаём DOM, пока пользователь редактирует поле или выпадающий список.
+  const active = document.activeElement;
+  if (active && (active.matches("input, textarea, select") || active.isContentEditable)) {
     return;
   }
 
@@ -1085,6 +1098,9 @@ initOnlineFilter();
 newConfig();
 loadConfigs();
 loadAgents();
+document.getElementById("configName").addEventListener("input", markConfigEditorDirty);
+document.getElementById("agentName").addEventListener("input", markConfigEditorDirty);
+document.getElementById("configBody").addEventListener("input", markConfigEditorDirty);
 setInterval(loadConfigs, 15000);
 setInterval(loadAgents, 2000);
 </script>

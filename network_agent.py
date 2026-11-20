@@ -37,7 +37,12 @@ def get_local_ip() -> str:
     """
     Возвращает реальный локальный IPv4-адрес, игнорируя виртуальные подсети и VPN.
     """
-    BAD_PREFIXES = ("127.", "0.", "172.0.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.30.", "172.31.")
+    BAD_PREFIXES = (
+        "127.", "0.",
+        "172.0.", "172.16.", "172.17.", "172.18.", "172.19.",
+        "172.20.", "172.30.", "172.31.",
+        "192.168.56.", "192.168.122.", "169.254.",
+    )
     
     # 1. Пробуем определить интерфейс по внешнему/сетевому маршруту без отправки данных
     for test_target in [("8.8.8.8", 80), ("1.1.1.1", 80)]:
@@ -57,7 +62,11 @@ def get_local_ip() -> str:
         hostname = socket.gethostname()
         infos = socket.gethostbyname_ex(hostname)
         for ip in infos[2]:
-            if (ip.startswith("192.168.") or ip.startswith("10.")) and ":" not in ip:
+            if (
+                (ip.startswith("192.168.") or ip.startswith("10."))
+                and not any(ip.startswith(p) for p in BAD_PREFIXES)
+                and ":" not in ip
+            ):
                 return ip
         for ip in infos[2]:
             if not any(ip.startswith(p) for p in BAD_PREFIXES) and ":" not in ip:
@@ -66,6 +75,19 @@ def get_local_ip() -> str:
         pass
 
     return "127.0.0.1"
+
+
+def get_local_ips() -> set:
+    """Return IPv4 addresses assigned to real local network interfaces."""
+    ips = set()
+    try:
+        hostname = socket.gethostname()
+        for ip in socket.gethostbyname_ex(hostname)[2]:
+            if ip and not ip.startswith(("127.", "169.254.", "192.168.56.", "192.168.122.")):
+                ips.add(ip)
+    except Exception:
+        pass
+    return ips
 
 
 def get_hostname() -> str:
@@ -335,9 +357,11 @@ class NetworkAgent:
                 pkt = json.loads(data.decode("utf-8"))
                 if pkt.get("magic") == DISCOVERY_MAGIC:
                     source_ip = _addr[0]
+                    if source_ip.startswith(("192.168.56.", "192.168.122.", "169.254.")):
+                        continue
                     if (
                         pkt.get("agent_id") == self.agent_id
-                        and source_ip == self.local_ip
+                        and source_ip in get_local_ips()
                     ):
                         continue
                     pkt["_source_ip"] = source_ip

@@ -27,6 +27,7 @@ py -m PyInstaller ^
  --workpath="%BUILD_DIR%\build" ^
  --distpath="%BUILD_DIR%\dist_temp" ^
  --hidden-import=winreg ^
+ --hidden-import=psutil ^
  uninstaller.py
 
 if %ERRORLEVEL% NEQ 0 (

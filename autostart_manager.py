@@ -3,6 +3,8 @@ import sys
 import subprocess
 import shutil
 import winreg
+import hashlib
+from xml.sax.saxutils import escape
 
 from logger import get_logger
 
@@ -47,13 +49,17 @@ def ensure_protected_runtime_copy(app_name="AntiGameController"):
     if not getattr(sys, "frozen", False):
         return os.path.abspath(sys.argv[0])
 
-    source_exe = os.path.abspath(sys.executable)
+    launcher_exe = os.environ.get("AGC_LAUNCHER_EXE")
+    if launcher_exe and os.path.isfile(launcher_exe):
+        source_exe = os.path.abspath(launcher_exe)
+    else:
+        source_exe = os.path.abspath(sys.executable)
     target_exe = get_protected_runtime_exe_path(app_name)
 
     try:
-        source_mtime = os.path.getmtime(source_exe)
-        target_mtime = os.path.getmtime(target_exe) if os.path.exists(target_exe) else 0
-        if (not os.path.exists(target_exe)) or source_mtime > target_mtime:
+        source_hash = hashlib.sha256(open(source_exe, "rb").read()).hexdigest()
+        target_hash = hashlib.sha256(open(target_exe, "rb").read()).hexdigest() if os.path.isfile(target_exe) else ""
+        if source_hash != target_hash:
             shutil.copy2(source_exe, target_exe)
         return target_exe
     except Exception:
@@ -121,39 +127,13 @@ class TaskSchedulerManager:
             return False
         try:
             self.delete_startup_task()
-
             target = self._get_target_command()
 
-            # Берём XML-путь: он надёжнее CLI, потому что позволяет задать
-            # несколько триггеров (ONSTART + MINUTE повтор) одной задачей,
-            # а ещё корректно экранирует пути с пробелами.
-            #
-            # Не используем /RU <user> потому что schtasks при включённом
-            # UAC требует пароль текущего пользователя. Запускаем от SYSTEM
-            # (по умолчанию, когда /RU не задан) — SYSTEM-процессу не нужен
-            # пароль и он спокойно стартует при любом состоянии сессии.
-            # GUI PyQt-программа под SYSTEM запустится без отображения окна
-            # на desktop интерактивной сессии, поэтому дополнительно
-            # используем ONLOGON-триггер, который срабатывает при входе
-            # пользователя и работает в его сессии.
-            task_name_secondary = f"{self.app_name}_OnLogon"
-            self.delete_startup_task(task_name_secondary)
-
-            xml = self._build_task_xml(target, task_name_secondary)
-            xml_path = os.path.join(
-                get_protected_runtime_dir(self.app_name),
-                "task_logon.xml",
-            )
-            with open(xml_path, "w", encoding="utf-16") as f:
-                f.write(xml)
-
-            # Создаём primary task (каждые 5 минут).
             cmd_primary = [
                 "schtasks", "/Create",
                 "/TN", self.task_name,
                 "/SC", "MINUTE",
-                "/MO", "1",         # 1 минута — быстрее реакция на падение
-                "/RL", "HIGHEST",
+                "/MO", "5",
                 "/F",
                 "/TR", target,
             ]
@@ -162,38 +142,14 @@ class TaskSchedulerManager:
                 capture_output=True, text=True, timeout=30,
                 **_hidden_kwargs(),
             )
-
-            # Создаём secondary task через XML — ONLOGON + повтор каждые 5 минут,
-            # чтобы при входе пользователя программа сразу запускалась в его
-            # сессии, и каждые 5 минут проверялась.
-            cmd_secondary = [
-                "schtasks", "/Create",
-                "/TN", task_name_secondary,
-                "/XML", xml_path,
-                "/F",
-            ]
-            r2 = subprocess.run(
-                cmd_secondary,
-                capture_output=True, text=True, timeout=30,
-                **_hidden_kwargs(),
-            )
-
-            try:
-                os.remove(xml_path)
-            except OSError:
-                pass
-
             if r1.returncode != 0:
                 logger.error(
-                    "schtasks primary failed: rc=%s stderr=%s",
-                    r1.returncode, (r1.stderr or "")[:300],
+                    "schtasks primary failed: rc=%s stdout=%s stderr=%s",
+                    r1.returncode,
+                    (r1.stdout or "")[:300],
+                    (r1.stderr or "")[:300],
                 )
-            if r2.returncode != 0:
-                logger.error(
-                    "schtasks ONLOGON failed: rc=%s stderr=%s",
-                    r2.returncode, (r2.stderr or "")[:300],
-                )
-            return r1.returncode == 0 or r2.returncode == 0
+            return r1.returncode == 0
         except Exception:
             logger.exception("create_startup_task")
             return False
@@ -206,6 +162,7 @@ class TaskSchedulerManager:
         # schtasks требует XML в UTF-16 LE с BOM. Триггеры:
         #   LogonTrigger    — при входе любого пользователя.
         #   TimeTrigger     — повтор каждые 5 минут от начала суток.
+        xml_target = escape(target)
         return (
             '<?xml version="1.0" encoding="UTF-16"?>\r\n'
             '<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\r\n'
@@ -227,7 +184,8 @@ class TaskSchedulerManager:
             '  <Principals>\r\n'
             '    <Principal id="Author">\r\n'
             '      <Group>S-1-5-4</Group>\r\n'
-            '      <RunLevel>HighestAvailable</RunLevel>\r\n'
+            '      <LogonType>InteractiveToken</LogonType>\r\n'
+            '      <RunLevel>LeastPrivilege</RunLevel>\r\n'
             '    </Principal>\r\n'
             '  </Principals>\r\n'
             '  <Settings>\r\n'
@@ -251,7 +209,7 @@ class TaskSchedulerManager:
             '  </Settings>\r\n'
             '  <Actions>\r\n'
             '    <Exec>\r\n'
-            f'      <Command>{target}</Command>\r\n'
+            f'      <Command>{xml_target}</Command>\r\n'
             '    </Exec>\r\n'
             '  </Actions>\r\n'
             '</Task>\r\n'
