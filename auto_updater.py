@@ -197,6 +197,7 @@ class AutoUpdater:
 chcp 65001 > nul
 set _MEIPASS=
 set _MEIPASS2=
+set PYINSTALLER_RESET_ENVIRONMENT=1
 timeout /t 2 /nobreak > nul
 :waitloop
 tasklist /FI "IMAGENAME eq {os.path.basename(current_exe)}" 2>NUL | find /I "{os.path.basename(current_exe)}" >NUL
@@ -204,9 +205,16 @@ if "%ERRORLEVEL%"=="0" (
     timeout /t 1 /nobreak > nul
     goto waitloop
 )
+for %%I in ("AGC_*.exe") do tasklist /FI "IMAGENAME eq %%~nxI" 2>NUL | find /I "%%~nxI" >NUL && (
+    timeout /t 1 /nobreak > nul
+    goto waitloop
+)
+:copyretry
 copy /Y "{new_exe}" "{current_exe}" > nul
-del /Q "{update_marker}" > nul
+if not exist "{current_exe}" goto copyretry
 start "" "{current_exe}"
+timeout /t 5 /nobreak > nul
+del /Q "{update_marker}" > nul
 del /Q "{new_exe}" > nul
 del /Q "{bat_path}"
 """
@@ -227,6 +235,8 @@ del /Q "{bat_path}"
             env = os.environ.copy()
             env.pop("_MEIPASS", None)
             env.pop("_MEIPASS2", None)
+            env.pop("PYINSTALLER_RESET_ENVIRONMENT", None)
+            env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
 
             # Очищаем PATH от старой папки PyInstaller во избежание ошибки DLL
             if hasattr(sys, '_MEIPASS'):

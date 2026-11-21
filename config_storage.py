@@ -13,6 +13,19 @@ import ctypes
 APP_NAME = "AntiGameController"
 
 
+def migrate_profile_config(config: dict) -> dict:
+    """Add default values required by the current application version."""
+    migrated = dict(config or {})
+    migrated.setdefault("enable_bsod_close_protection", False)
+    migrated["enable_bsod_close_protection"] = bool(
+        migrated.get("enable_bsod_close_protection", False)
+    )
+    migrated.setdefault("enable_autostart", True)
+    migrated.setdefault("enable_process_protection", True)
+    migrated.setdefault("host_mode", False)
+    return migrated
+
+
 def _set_hidden(path: str) -> None:
     """Делает файл/папку скрытым в Windows"""
     if os.name == "nt":
@@ -92,6 +105,7 @@ def _save_index(index: dict) -> bool:
 def _write_profile(profile_id: str, profile_name: str, config: dict, source: str) -> str:
     root = _storage_root()
     target = os.path.join(root, profile_id)
+    config = migrate_profile_config(config)
 
     with open(target, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=4)
@@ -141,7 +155,12 @@ def load_config(profile_id: str) -> dict | None:
         return None
     try:
         with open(target, "r", encoding="utf-8") as f:
-            return json.load(f)
+            config = json.load(f)
+        migrated = migrate_profile_config(config)
+        if migrated != config:
+            with open(target, "w", encoding="utf-8") as f:
+                json.dump(migrated, f, ensure_ascii=False, indent=4)
+        return migrated
     except Exception as e:
         print(f"[config_storage] Ошибка чтения профиля {profile_id}: {e}")
         return None

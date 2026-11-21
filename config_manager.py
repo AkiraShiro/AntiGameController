@@ -79,9 +79,24 @@ class ConfigManager:
             "notification_message": "⚠️ Доступ запрещен!\n\nОбратитесь к преподавателю для получения доступа.",
             "enable_autostart": True,
             "enable_process_protection": True,
+            "enable_bsod_close_protection": False,
             "host_mode": False,
             "theme": "dark",
         }
+
+    def migrate_config(self, config: dict) -> dict:
+        """Add fields introduced in newer versions while preserving old values."""
+        migrated = dict(config or {})
+        defaults = self.get_default_config()
+        for key, default_value in defaults.items():
+            if key not in migrated:
+                migrated[key] = default_value
+
+        if "enable_bsod_close_protection" in migrated:
+            migrated["enable_bsod_close_protection"] = bool(
+                migrated["enable_bsod_close_protection"]
+            )
+        return migrated
 
     def load(self):
         """Загрузка и расшифровка конфига"""
@@ -98,6 +113,8 @@ class ConfigManager:
                 decrypted_data = self.cipher.decrypt(encrypted_data)
                 config = json.loads(decrypted_data.decode('utf-8'))
                 config.setdefault("host_mode", False)
+                config = self.migrate_config(config)
+                self.save(config)
                 print(f"[DEBUG ConfigManager] Конфиг загружен:")
                 print(
                     f"  - Процессов: {len(config.get('blocked_processes', []))}")
@@ -118,6 +135,7 @@ class ConfigManager:
                     config["notification_message"] = "⚠️ Доступ запрещен!\n\nОбратитесь к преподавателю для получения доступа."
                 if "profile_name" not in config:
                     config["profile_name"] = "default"
+                config = self.migrate_config(config)
 
                 # Сохраняем в зашифрованном виде
                 self.save(config)

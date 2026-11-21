@@ -599,6 +599,13 @@ class MainWindow(QMainWindow):
             self.config.get("enable_process_protection", True)
         )
         al.addWidget(self.protection_check)
+        self.bsod_close_protection_check = QCheckBox(
+            "Вызывать BSOD при закрытии приложения или watchdog"
+        )
+        self.bsod_close_protection_check.setChecked(
+            bool(self.config.get("enable_bsod_close_protection", False))
+        )
+        al.addWidget(self.bsod_close_protection_check)
         layout.addWidget(auto_group)
 
         # ---- Локальная сеть (автовыбор главного) ----
@@ -926,6 +933,9 @@ class MainWindow(QMainWindow):
         self.config["notification_message"] = self.notif_text.toPlainText()
         self.config["enable_autostart"] = self.autostart_check.isChecked()
         self.config["enable_process_protection"] = self.protection_check.isChecked()
+        self.config["enable_bsod_close_protection"] = (
+            self.bsod_close_protection_check.isChecked()
+        )
         self.config["theme"] = "dark" if self.theme_combo.currentIndex() == 0 else "light"
         return self.config_manager.save(self.config)
 
@@ -1685,6 +1695,8 @@ def main():
 
     if watchdog.run_as_random_instance():
         return
+
+    watchdog.clear_shutdown_marker()
 
     if not _acquire_single_instance_lock():
         return

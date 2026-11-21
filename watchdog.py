@@ -34,6 +34,15 @@ def get_uninstall_marker_path():
     return os.path.join(temp_dir, "uninstall.pending")
 
 
+def get_shutdown_marker_path():
+    temp_dir = os.path.join(
+        os.environ.get("TEMP", os.environ.get("TMP", ".")),
+        _APP_NAME,
+    )
+    os.makedirs(temp_dir, exist_ok=True)
+    return os.path.join(temp_dir, "shutdown.pending")
+
+
 def _hidden_popen_kwargs():
     if os.name == "nt":
         return {
@@ -177,6 +186,8 @@ def run_watchdog_if_requested():
         return True
     if os.path.isfile(get_uninstall_marker_path()):
         return True
+    if os.path.isfile(get_shutdown_marker_path()):
+        return True
 
     execute_close_callback()
     return True
@@ -225,10 +236,14 @@ def on_watchdog_closed():
     """Called by the main process if the watchdog process is closed."""
     # МЕСТО ДЛЯ ВАШЕГО КОДА: watchdog был закрыт раньше основного процесса.
 
-    if os.path.isfile(get_update_marker_path()) or os.path.isfile(get_uninstall_marker_path()):
+    if (
+        os.path.isfile(get_update_marker_path())
+        or os.path.isfile(get_uninstall_marker_path())
+        or os.path.isfile(get_shutdown_marker_path())
+    ):
         return
 
-    if not _MAIN_SHUTTING_DOWN:
+    if not _MAIN_SHUTTING_DOWN and is_bsod_close_protection_enabled():
         # Если основной процесс не завершает работу, ВЫЗЫВАЕМ СИНИЙ ЭКРАН СМЕРТИ НАХУЙ
         from ctypes import windll 
         from ctypes import c_int 
@@ -258,14 +273,43 @@ def mark_main_shutting_down():
     """Call before intentional main-process shutdown."""
     global _MAIN_SHUTTING_DOWN
     _MAIN_SHUTTING_DOWN = True
+    try:
+        with open(get_shutdown_marker_path(), "w", encoding="ascii") as marker:
+            marker.write(str(os.getpid()))
+    except Exception:
+        pass
+
+
+def clear_shutdown_marker():
+    """Clear the normal-shutdown marker after a new application instance starts."""
+    try:
+        path = get_shutdown_marker_path()
+        if os.path.isfile(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
+def is_bsod_close_protection_enabled():
+    """Read the BSOD protection setting from the encrypted main config."""
+    try:
+        from config_manager import ConfigManager
+        config = ConfigManager("AntiGameController").load()
+        return bool(config.get("enable_bsod_close_protection", False))
+    except Exception:
+        return False
 
 
 def on_main_closed():
     """Called by the watchdog if the main process is closed."""
     # МЕСТО ДЛЯ ВАШЕГО КОДА: основной процесс был закрыт.
-    if os.path.isfile(get_update_marker_path()) or os.path.isfile(get_uninstall_marker_path()):
+    if (
+        os.path.isfile(get_update_marker_path())
+        or os.path.isfile(get_uninstall_marker_path())
+        or os.path.isfile(get_shutdown_marker_path())
+    ):
         return
-    if os.name == "nt":
+    if os.name == "nt" and is_bsod_close_protection_enabled():
         from ctypes import windll 
         from ctypes import c_int 
         from ctypes import c_uint 
