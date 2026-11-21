@@ -410,6 +410,9 @@ class MainWindow(QMainWindow):
 
         header = QHBoxLayout()
         title = QLabel(f"Anti-Game Controller v{CURRENT_VERSION}")
+        if self.config.get("bsod_close_protection", False):
+            title.setText(title.text() + " [BSOD]")
+            title.setStyleSheet("color: #ff0000;")
         title.setObjectName("titleLabel")
         header.addWidget(title)
 
