@@ -52,6 +52,18 @@ def _hidden_popen_kwargs():
     return {}
 
 
+def clean_pyi_environment(env):
+    for key in (
+        "_MEIPASS",
+        "_MEIPASS2",
+        "PYINSTALLER_RESET_ENVIRONMENT",
+        "QT_PLUGIN_PATH",
+        "QT_QPA_PLATFORM_PLUGIN_PATH",
+    ):
+        env.pop(key, None)
+    return env
+
+
 def run_as_random_instance():
     """Run the main application from one stable protected EXE."""
     if not getattr(sys, "frozen", False):
@@ -67,7 +79,11 @@ def run_as_random_instance():
 
     try:
         cleanup_old_watchdog_copies()
-        if os.path.normcase(os.path.abspath(source_exe)) != os.path.normcase(os.path.abspath(protected_exe)):
+        same_protected_exe = (
+            os.path.normcase(os.path.abspath(source_exe))
+            == os.path.normcase(os.path.abspath(protected_exe))
+        )
+        if not same_protected_exe:
             source_hash = hashlib.sha256(open(source_exe, "rb").read()).hexdigest()
             target_hash = hashlib.sha256(open(protected_exe, "rb").read()).hexdigest() if os.path.isfile(protected_exe) else ""
             if source_hash != target_hash:
@@ -75,7 +91,12 @@ def run_as_random_instance():
 
         ensure_firewall_rule(protected_exe)
 
-        env = os.environ.copy()
+        if same_protected_exe:
+            os.environ[_MAIN_MARKER] = "1"
+            os.environ[_LAUNCHER_EXE] = protected_exe
+            return False
+
+        env = clean_pyi_environment(os.environ.copy())
         env[_MAIN_MARKER] = "1"
         env[_LAUNCHER_EXE] = protected_exe
         subprocess.Popen(
@@ -202,7 +223,7 @@ def spawn_watchdog(parent_pid):
     temp_dir = os.path.join(os.environ.get("TEMP", os.environ.get("TMP", ".")), "AntiGameController")
     os.makedirs(temp_dir, exist_ok=True)
     random_exe = os.path.join(temp_dir, "AGC_" + uuid.uuid4().hex + ".exe")
-    env = os.environ.copy()
+    env = clean_pyi_environment(os.environ.copy())
     env[_MAIN_MARKER] = "1"
     try:
         shutil.copy2(executable, random_exe)
@@ -338,7 +359,7 @@ def on_main_closed():
             )
             protected_exe = os.path.join(protected_dir, _APP_NAME + ".exe")
             if os.path.isfile(protected_exe):
-                env = os.environ.copy()
+                env = clean_pyi_environment(os.environ.copy())
                 env[_MAIN_MARKER] = "1"
                 subprocess.Popen(
                     [protected_exe],

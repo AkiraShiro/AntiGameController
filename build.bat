@@ -27,6 +27,11 @@ py -m PyInstaller ^
  --name=AntiGameController ^
  --onefile ^
  --noconsole ^
+ --collect-submodules=ssl ^
+ --collect-submodules=_ssl ^
+ --hidden-import=ssl ^
+ --hidden-import=_ssl ^
+ --hidden-import=_hashlib ^
  --workpath="%BUILD_DIR%\build" ^
  --distpath="%BUILD_DIR%\dist_temp" ^
  --add-data="styles.py;." ^
@@ -43,6 +48,10 @@ py -m PyInstaller ^
  --hidden-import=PyQt5.QtCore ^
  --hidden-import=PyQt5.QtGui ^
  --hidden-import=PyQt5.QtWidgets ^
+ --hidden-import=pynput ^
+ --hidden-import=pynput.keyboard ^
+ --hidden-import=pynput._util ^
+ --hidden-import=pynput._util.win32 ^
  main.py
 
 if %ERRORLEVEL% NEQ 0 (

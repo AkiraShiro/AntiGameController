@@ -12,12 +12,18 @@ GUI на PyQt5 для управления блокировкой игр и са
 """
 import sys
 import os
+import watchdog as _startup_watchdog
+
+if "--agc-watchdog" in sys.argv:
+    if _startup_watchdog.run_watchdog_if_requested():
+        raise SystemExit(0)
 import threading
 import time
 import hashlib
 import subprocess
 import msvcrt
 from version import CURRENT_VERSION
+
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QListWidget, QPushButton, QLineEdit, QLabel,
@@ -37,8 +43,8 @@ from autostart_manager import TaskSchedulerManager, AutostartManager
 from styles import DARK_THEME, LIGHT_THEME
 from network_agent import NetworkAgent
 from auto_updater import AutoUpdater
-from pynput.keyboard import Key, Controller
 import winreg
+import shutil
 import watchdog
 
 import config_storage
@@ -243,8 +249,15 @@ class LockScreen(QWidget):
         self.pressed_keys = set()
         self.allow_exit = False  # Флаг разрешения на закрытие
 
-        # Инициализация контроллера клавиатуры pynput
-        self.keyboard_controller = Controller()
+        # pynput can fail in a Task Scheduler desktop-less session.
+        self.keyboard_controller = None
+        self.esc_key = None
+        try:
+            from pynput.keyboard import Key, Controller
+            self.keyboard_controller = Controller()
+            self.esc_key = Key.esc
+        except Exception:
+            pass
 
         # Настройка таймера для симуляции клика Esc
         self.esc_timer = QTimer(self)
@@ -284,8 +297,13 @@ class LockScreen(QWidget):
 
     # Функция отправки нажатия Esc
     def press_esc_key(self):
-        self.keyboard_controller.press(Key.esc)
-        self.keyboard_controller.release(Key.esc)
+        if self.keyboard_controller is None or self.esc_key is None:
+            return
+        try:
+            self.keyboard_controller.press(self.esc_key)
+            self.keyboard_controller.release(self.esc_key)
+        except Exception:
+            pass
 
     # 1. Защита от Alt+F4 и стандартного закрытия
     def closeEvent(self, event):
@@ -403,18 +421,27 @@ class MainWindow(QMainWindow):
 
     # ------------- UI init -------------
 
+    def _update_title_bsod_marker(self):
+        if not hasattr(self, "title_label"):
+            return
+        base_title = f"Anti-Game Controller v{CURRENT_VERSION}"
+        if bool(self.config.get("enable_bsod_close_protection", False)):
+            self.title_label.setText(base_title + " [BSOD]")
+            self.title_label.setStyleSheet("color: #ff0000;")
+        else:
+            self.title_label.setText(base_title)
+            self.title_label.setStyleSheet("")
+
     def init_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
 
         header = QHBoxLayout()
-        title = QLabel(f"Anti-Game Controller v{CURRENT_VERSION}")
-        if self.config.get("bsod_close_protection", False):
-            title.setText(title.text() + " [BSOD]")
-            title.setStyleSheet("color: #ff0000;")
-        title.setObjectName("titleLabel")
-        header.addWidget(title)
+        self.title_label = QLabel(f"Anti-Game Controller v{CURRENT_VERSION}")
+        self._update_title_bsod_marker()
+        self.title_label.setObjectName("titleLabel")
+        header.addWidget(self.title_label)
 
         self.profile_label = QLabel(
             f"Профиль: {self.config.get('profile_name', 'default')}"
@@ -940,7 +967,10 @@ class MainWindow(QMainWindow):
             self.bsod_close_protection_check.isChecked()
         )
         self.config["theme"] = "dark" if self.theme_combo.currentIndex() == 0 else "light"
-        return self.config_manager.save(self.config)
+        saved = self.config_manager.save(self.config)
+        if saved:
+            self._update_title_bsod_marker()
+        return saved
 
     # ------------- Профили конфигов -------------
 
@@ -1333,19 +1363,25 @@ class MainWindow(QMainWindow):
             # Эти ключи никогда не должны затираться общим шаблоном конфига
             protected_keys = [
                 "agent_id", "agent_name", "password_hash", "profile_name",
-                "host_mode",
+                "host_mode", "enable_bsod_close_protection",
             ]
             for key in protected_keys:
                 new_cfg.pop(key, None) # Безопасно удаляем ключ из присланного конфига
             # ------------------------------------------------------
 
             self.config.update(new_cfg)
+            self.config = self.config_manager.migrate_config(self.config)
 
             # Сохраняем обновленный конфиг
             if self.config_manager.save(self.config):
                 self.load_lists_to_ui()
                 self.refresh_profiles_list()
                 self.apply_theme()
+                self._update_title_bsod_marker()
+                if hasattr(self, "bsod_close_protection_check"):
+                    self.bsod_close_protection_check.setChecked(
+                        bool(self.config.get("enable_bsod_close_protection", False))
+                    )
                 if self.is_monitoring:
                     self.apply_blocking()
                 logger.info("[server] конфигурация успешно применена и сохранена")
@@ -1693,6 +1729,12 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    if getattr(sys, "frozen", False):
+        try:
+            os.chdir(os.path.dirname(os.path.abspath(sys.executable)))
+        except Exception:
+            pass
+
     if watchdog.run_watchdog_if_requested():
         return
 

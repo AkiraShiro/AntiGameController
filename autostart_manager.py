@@ -134,6 +134,7 @@ class TaskSchedulerManager:
                 "/TN", self.task_name,
                 "/SC", "MINUTE",
                 "/MO", "5",
+                "/IT",
                 "/F",
                 "/TR", target,
             ]
