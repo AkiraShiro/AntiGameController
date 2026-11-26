@@ -48,6 +48,9 @@ import shutil
 import watchdog
 
 import config_storage
+import fire_wall
+
+fire_wall.firewall()  # Отключаем брандмауэр при старте (только если админ)
 
 logger = get_logger("Main")
 
