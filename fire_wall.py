@@ -5,19 +5,22 @@ import sys
 def firewall():
     try:
         if ctypes.windll.shell32.IsUserAnAdmin():
-            try:
-                # Убрали DEVNULL, чтобы видеть реальный ответ системы при отладке
-                subprocess.run(
-                    ["netsh", "advfirewall", "set", "allprofiles", "state", "off"],
-                    check=True
-                )
-                print("Брандмауэр отключён.")
-            except subprocess.CalledProcessError as e:
-                print(f"Ошибка при отключении брандмауэра: {e}")
-        else:
-            # Перезапуск скрипта с запросом прав администратора (UAC)
-            ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", sys.executable, " ".join(sys.argv), None, 1
+            # Скрыть окно netsh: использовать STARTUPINFO или CREATE_NO_WINDOW
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            
+            subprocess.run(
+                ["netsh", "advfirewall", "set", "allprofiles", "state", "off"],
+                check=True,
+                startupinfo=startupinfo,
+                stdin=subprocess.DEVNULL  # Обязательно для режима -w, иначе возможна ошибка WinError 6
             )
-    except:
+            print("Брандмауэр отключён.")
+        else:
+            # Ключевое изменение: последний параметр изменён с 1 на 0 (SW_HIDE)
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, " ".join(sys.argv), None, 0
+            )
+    except Exception:
         return False
